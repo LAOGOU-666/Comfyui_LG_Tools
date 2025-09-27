@@ -467,7 +467,6 @@ class LG_LoadImage(LoadImage):
         files = folder_paths.filter_files_content_types(files, ["image"])
         return {"required":
                     {"image": (sorted(files), {"image_upload": True}),
-                     "keep_alpha": ("BOOLEAN", {"default": False, "label_on": "RGBA", "label_off": "RGB"}),
                     },
                 }
 
@@ -478,26 +477,15 @@ class LG_LoadImage(LoadImage):
     FUNCTION = "load_image"
 
     @classmethod
-    def IS_CHANGED(s, image, keep_alpha=False):
-        # 调用父类的IS_CHANGED方法，只传递image参数
+    def IS_CHANGED(s, image):
+        # 调用父类的IS_CHANGED方法
         return LoadImage.IS_CHANGED(image)
 
-    def load_image(self, image, keep_alpha=False):
-        # 先调用父类方法获取完整的图像和遮罩
+    def load_image(self, image):
+        # 调用父类方法获取完整的图像和遮罩
         image_tensor, mask_tensor = super().load_image(image)
         
-        if keep_alpha:
-            # 如果需要保持alpha，重新加载为RGBA格式
-            image_path = folder_paths.get_annotated_filepath(image)
-            i = Image.open(image_path)
-            i = ImageOps.exif_transpose(i)
-            
-            if 'A' in i.getbands():
-                image = i.convert("RGBA")
-                image = np.array(image).astype(np.float32) / 255.0
-                image_tensor = torch.from_numpy(image)[None,]
-        
-        # 遮罩直接使用父类提取的结果，不受keep_alpha影响
+        # 返回图像、遮罩和文件名
         return (image_tensor, mask_tensor, image)
 
 

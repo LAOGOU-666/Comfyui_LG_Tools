@@ -139,18 +139,21 @@ app.registerExtension({
                         ctx.fillStyle = "#000";
                         ctx.fillRect(rectX, rectY, rectWidth, rectHeight);
                         
-                        let scaleX = rectWidth / img.naturalWidth;
-                        let scaleY = rectHeight / img.naturalHeight;
-                        let scale = Math.min(scaleX, scaleY);
-                        
-                        let imgHeight = scale * img.naturalHeight;
-                        let imgWidth = scale * img.naturalWidth;
-                        
-                        const imgX = rectX + (rectWidth - imgWidth) / 2;
-                        const imgY = rectY + (rectHeight - imgHeight) / 2;
-                        
-                        const margin = 2;
-                        ctx.drawImage(img, imgX + margin, imgY + margin, imgWidth - 2 * margin, imgHeight - 2 * margin);
+                        // 检查图像是否有效加载
+                        if (img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                            let scaleX = rectWidth / img.naturalWidth;
+                            let scaleY = rectHeight / img.naturalHeight;
+                            let scale = Math.min(scaleX, scaleY);
+                            
+                            let imgHeight = scale * img.naturalHeight;
+                            let imgWidth = scale * img.naturalWidth;
+                            
+                            const imgX = rectX + (rectWidth - imgWidth) / 2;
+                            const imgY = rectY + (rectHeight - imgHeight) / 2;
+                            
+                            const margin = 2;
+                            ctx.drawImage(img, imgX + margin, imgY + margin, imgWidth - 2 * margin, imgHeight - 2 * margin);
+                        }
                     }
                 }
                 
@@ -561,10 +564,6 @@ app.registerExtension({
                 data.isWaitingSelection = this.isWaitingSelection;
                 data.currentMode = this.currentMode;
                 
-                if (this.imageData && this.imageData.length > 0) {
-                    data.imageData = this.imageData;
-                }
-                
                 if (this.selected_images && this.selected_images.size > 0) {
                     data.selected_images = Array.from(this.selected_images);
                 }
@@ -579,28 +578,6 @@ app.registerExtension({
                 
                 this.isWaitingSelection = data.isWaitingSelection || false;
                 this.currentMode = data.currentMode || "always_pause";
-                
-                if (data.imageData && data.imageData.length > 0) {
-                    this.imageData = data.imageData;
-                    
-                    this.imgs = [];
-                    let loadedCount = 0;
-                    
-                    this.imageData.forEach((imgData, i) => {
-                        const img = new Image();
-                        img.onload = () => {
-                            loadedCount++;
-                            
-                            if (loadedCount === this.imageData.length) {
-                                this.calculateImageLayout();
-                                app.graph.setDirtyCanvas(true);
-                            }
-                        };
-                        
-                        img.src = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&type=${imgData.type}&subfolder=${imgData.subfolder}`);
-                        this.imgs.push(img);
-                    });
-                }
                 
                 this.ensurePropertiesValid();
                 if (data.selected_images && Array.isArray(data.selected_images)) {
