@@ -43,6 +43,7 @@ class QueueManager {
     this.queueNodeIds = null;
     this.processingQueue = false;
     this.lastAdjustedMouseEvent = null;
+    this.isLGTriggered = false; // 标记是否由 LG 扩展触发
     this.initializeHooks();
   }
 
@@ -70,8 +71,9 @@ class QueueManager {
       return promise;
     }.bind(this);
 
-    api.queuePrompt = async function(index, prompt) {
-      if (this.queueNodeIds && this.queueNodeIds.length && prompt.output) {
+    api.queuePrompt = async function(index, prompt, ...args) {
+      // 仅在 LG 扩展触发时才修改 prompt.output
+      if (this.isLGTriggered && this.queueNodeIds && this.queueNodeIds.length && prompt.output) {
         const oldOutput = prompt.output;
         let newOutput = {};
         for (const queueNodeId of this.queueNodeIds) {
@@ -79,11 +81,13 @@ class QueueManager {
         }
         prompt.output = newOutput;
       }
+      
       this.eventManager.dispatchEvent("comfy-api-queue-prompt-before", {
         workflow: prompt.workflow,
         output: prompt.output,
       });
-      const response = originalApiQueuePrompt.apply(api, [index, prompt]);
+      
+      const response = originalApiQueuePrompt.apply(api, [index, prompt, ...args]);
       this.eventManager.dispatchEvent("comfy-api-queue-prompt-end");
       return response;
     }.bind(this);
@@ -131,11 +135,13 @@ class QueueManager {
   async queueOutputNodes(nodeIds) {
     try {
       this.queueNodeIds = nodeIds;
+      this.isLGTriggered = true; // 设置 LG 触发标记
       await app.queuePrompt();
     } catch (e) {
       console.error("队列节点时出错:", e);
     } finally {
       this.queueNodeIds = null;
+      this.isLGTriggered = false; // 清除 LG 触发标记
     }
   }
   getLastMouseEvent() {
