@@ -1,4 +1,6 @@
 from .md import *
+import json
+
 CATEGORY_TYPE = "🎈LAOGOU/Utils"
 
 def execute_command_with_realtime_output(cmd, cwd, message_path, clear_first=True, start_message=""):
@@ -61,30 +63,9 @@ def execute_command_with_realtime_output(cmd, cwd, message_path, clear_first=Tru
         })
         return False, str(e)
 
-pb_id_cnt = time.time()
-preview_bridge_image_id_map = {}
-preview_bridge_image_name_map = {}
+# 缓存相关的全局变量
 preview_bridge_cache = {}
-preview_bridge_last_mask_cache = {}
-# 存储每个节点的图片hash，用于检测图片内容变化
 preview_bridge_image_hashes = {}
-
-def set_previewbridge_image(node_id, file, item):
-    global pb_id_cnt
-
-    if file in preview_bridge_image_name_map:
-        pb_id = preview_bridge_image_name_map[node_id, file]
-        if pb_id.startswith(f"${node_id}"):
-            return pb_id
-
-    pb_id = f"${node_id}-{pb_id_cnt}"
-    
-    preview_bridge_image_id_map[pb_id] = (file, item)
-    preview_bridge_image_name_map[node_id, file] = (pb_id, item)
-    
-    pb_id_cnt += 1
-
-    return pb_id
 
 
 class CachePreviewBridge:
@@ -122,66 +103,57 @@ class CachePreviewBridge:
         except:
             return None
     @staticmethod
-    def load_image(pb_id):
-        clipspace_dir = os.path.join(folder_paths.get_input_directory(), "clipspace")
-        files = [f for f in os.listdir(clipspace_dir) 
-                if f.lower().startswith('clipspace') and f.lower().endswith('.png')]
-        
-        # 初始化默认值
+    def load_image_from_fileinfo(file_info_json):
+        """从 JSON 文件信息加载图片"""
+        # 初始化默认值（64*64 遮罩表示无效遮罩）
         image = torch.zeros((1, 512, 512, 3), dtype=torch.float32, device="cpu")
-        mask = torch.zeros((512, 512), dtype=torch.float32, device="cpu")
+        mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
         ui_item = {
             "filename": 'empty.png',
             "subfolder": '',
             "type": 'temp'
         }
         
-        if files:
-            latest_file = max(files, key=lambda f: os.path.getmtime(os.path.join(clipspace_dir, f)))
-            latest_path = os.path.join(clipspace_dir, latest_file)
-            latest_mtime = os.path.getmtime(latest_path)
+        if not file_info_json:
+            final_mask = mask.unsqueeze(0) if len(mask.shape) == 2 else mask
+            return image, final_mask, ui_item
+        
+        try:
+            # 只支持 JSON 格式
+            file_info = json.loads(file_info_json)
+            filename = file_info.get('filename')
+            subfolder = file_info.get('subfolder', '')
+            file_type = file_info.get('type', 'input')
             
-            current_path = None
-            if pb_id in preview_bridge_image_id_map:
-                current_path, ui_item = preview_bridge_image_id_map[pb_id]
-                current_mtime = os.path.getmtime(current_path) if os.path.exists(current_path) else 0
+            if not filename:
+                final_mask = mask.unsqueeze(0) if len(mask.shape) == 2 else mask
+                return image, final_mask, ui_item
             
-            if current_path is None or latest_mtime > current_mtime:
-                preview_dir = os.path.join(folder_paths.get_temp_directory(), 'PreviewBridge')
-                os.makedirs(preview_dir, exist_ok=True)
-                
-                new_filename = f"PB-{os.path.splitext(latest_file)[0]}.png"
-                new_path = os.path.join(preview_dir, new_filename)
-                
-                # 检查是否存在同名文件
-                if os.path.exists(new_path):
-                    if pb_id in preview_bridge_image_id_map:
-                        current_path, ui_item = preview_bridge_image_id_map[pb_id]
-                        if os.path.exists(current_path):
-                            new_path = current_path
-                        else:
-                            import shutil
-                            shutil.copy2(latest_path, new_path)
-                            ui_item = {
-                                "filename": new_filename,
-                                "subfolder": 'PreviewBridge',
-                                "type": 'temp'
-                            }
-                            preview_bridge_image_id_map[pb_id] = (new_path, ui_item)
-                else:
-                    import shutil
-                    shutil.copy2(latest_path, new_path)
-                    ui_item = {
-                        "filename": new_filename,
-                        "subfolder": 'PreviewBridge',
-                        "type": 'temp'
-                    }
-                    preview_bridge_image_id_map[pb_id] = (new_path, ui_item)
-                
-                current_path = new_path
+            # 构建文件路径
+            if file_type == 'input':
+                base_dir = folder_paths.get_input_directory()
+            elif file_type == 'output':
+                base_dir = folder_paths.get_output_directory()
+            elif file_type == 'temp':
+                base_dir = folder_paths.get_temp_directory()
+            else:
+                base_dir = folder_paths.get_input_directory()
             
-            try:
-                i = Image.open(current_path)
+            if subfolder:
+                file_path = os.path.join(base_dir, subfolder, filename)
+            else:
+                file_path = os.path.join(base_dir, filename)
+            
+            # 更新 ui_item
+            ui_item = {
+                "filename": filename,
+                "subfolder": subfolder,
+                "type": file_type
+            }
+            
+            # 加载图片
+            if os.path.exists(file_path):
+                i = Image.open(file_path)
                 i = ImageOps.exif_transpose(i)
                 image = i.convert("RGB")
                 image = np.array(image).astype(np.float32) / 255.0
@@ -192,112 +164,86 @@ class CachePreviewBridge:
                     mask = 1. - torch.from_numpy(mask)
                 else:
                     mask = torch.zeros((image.shape[1], image.shape[2]), dtype=torch.float32, device="cpu")
-            except Exception as e:
-                print(f"Error loading image: {e}")
-                # 出错时使用默认值
+        except Exception as e:
+            print(f"[CachePreviewBridge] 加载图片失败: {e}")
 
         final_mask = mask.unsqueeze(0) if len(mask.shape) == 2 else mask
         return image, final_mask, ui_item
 
     def doit(self, image, unique_id, images=None, extra_pnginfo=None):
-        # 智能决定使用模式：基于图片内容hash检测
-        current_hash = self.calculate_image_hash(images) if images is not None else None
-        last_hash = preview_bridge_image_hashes.get(unique_id)
-
-        # 检测图片是否发生改变
-        has_changed = current_hash != last_hash
-        has_valid_images = images is not None
-
-        # 决定使用模式：
-        # - 如果没有输入图片，使用 cache 模式
-        # - 如果有输入图片且内容发生改变，使用 input 模式
-        # - 如果有输入图片但内容没有改变，使用 cache 模式
-        if not has_valid_images:
-            use_cache = True
-            mode_reason = "No images input"
-        elif has_changed:
-            use_cache = False
-            mode_reason = f"Images changed (hash: {last_hash} -> {current_hash})"
-        else:
-            use_cache = True
-            mode_reason = f"Images unchanged (hash: {current_hash})"
-
-        print(f"[CachePreviewBridge] Node {unique_id}: {mode_reason}, using {'cache' if use_cache else 'input'} mode")
-
-        # 更新存储的hash值
-        if current_hash is not None:
-            preview_bridge_image_hashes[unique_id] = current_hash
-
-        # 检查是否有新的剪贴板图片需要更新缓存
-        if images is None and image and image not in preview_bridge_image_id_map:
-            print("Component value changed, updating cache")
-            # 生成新的pb_id并更新缓存
-            pb_id = f"${unique_id}-{time.time()}"
-            pixels, mask, path_item = CachePreviewBridge.load_image(pb_id)
-            if path_item["type"] != "temp" or path_item["filename"] != "empty.png":
-                return {
-                    "ui": {"images": [path_item]},
-                    "result": (pixels, mask),
-                }
-
-        # 原有的判断逻辑
-        if images is None and not image:
-            empty_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32, device="cpu")
-            empty_mask = torch.zeros((1, 512, 512), dtype=torch.float32, device="cpu")
-            return {
-                "ui": {"images": []},
-                "result": (empty_image, empty_mask),
-            }
-
-        if use_cache:
-            if not image:
-                
-                empty_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32, device="cpu")
-                empty_mask = torch.zeros((1, 512, 512), dtype=torch.float32, device="cpu")
-                return {
-                    "ui": {"images": []},
-                    "result": (empty_image, empty_mask),
-                }
-
-            if image.startswith('$'):
-                node_id = image.split('-')[0][1:]
-                related_pb_ids = [pb_id for pb_id in preview_bridge_image_id_map.keys() 
-                                if pb_id.startswith(f"${node_id}-")]
-                
-                if related_pb_ids:
-                    latest_pb_id = max(related_pb_ids, key=lambda x: float(x.split('-')[1]))
-                    image = latest_pb_id
-                    pixels, mask, path_item = CachePreviewBridge.load_image(image)
-                    return {
-                        "ui": {"images": [path_item]},
-                        "result": (pixels, mask),
-                    }
-
-        # 非缓存模式或需要创建新缓存
+        """
+        简化逻辑：
+        1. 如果有 images 输入，保存并返回
+        2. 如果没有 images 输入但有 image (文件信息)，从文件加载
+        3. 否则返回空图像
+        """
+        # 情况1: 有图像输入 - 从 clipspace 加载遮罩，或使用输入的图像
         if images is not None:
-            mask = torch.zeros((1, images.shape[1], images.shape[2]), dtype=torch.float32, device="cpu")
+            # 更新 hash
+            current_hash = self.calculate_image_hash(images)
+            preview_bridge_image_hashes[unique_id] = current_hash
+            
+            # 默认遮罩（64*64 表示无效遮罩）
+            mask = torch.zeros((1, 64, 64), dtype=torch.float32, device="cpu")
+            ui_item = None
+            
+            # 如果有文件信息，尝试从文件加载遮罩
+            if image and image.strip():
+                _, loaded_mask, path_item = CachePreviewBridge.load_image_from_fileinfo(image)
+                
+                # 如果成功加载了遮罩，使用它
+                if path_item["filename"] != 'empty.png':
+                    # 调整遮罩尺寸以匹配图像
+                    if loaded_mask.shape[-2:] == (images.shape[1], images.shape[2]):
+                        mask = loaded_mask
+                        ui_item = path_item  # 保存 clipspace 文件信息用于 UI 预览
+            
+            # 如果有 clipspace 文件，直接返回 clipspace 的预览
+            if ui_item:
+                return {
+                    "ui": {"images": [ui_item]},
+                    "result": (images, mask),
+                }
+            
+            # 否则保存新预览图并返回默认的 64*64 遮罩
             res = PreviewImage().save_images(
                 images, 
                 filename_prefix=f"PreviewBridge/PB-{unique_id}-", 
                 extra_pnginfo=extra_pnginfo
             )
-
-            image2 = res['ui']['images']
-            pixels = images
-
-            path = os.path.join(folder_paths.get_temp_directory(), 'PreviewBridge', image2[0]['filename'])
-            pb_id = set_previewbridge_image(unique_id, path, image2[0])
             
-            preview_bridge_cache[unique_id] = (images, image2)
+            # 缓存结果
+            preview_bridge_cache[unique_id] = (images, res['ui']['images'])
             
             return {
-                "ui": {"images": image2},
-                "result": (pixels, mask),
+                "ui": {"images": res['ui']['images']},
+                "result": (images, mask),
             }
         
-        # 如果走到这里,说明既没有有效的缓存也没有新的图像输入
+        # 情况2: 没有图像输入，但有文件信息 - 从文件加载
+        if image and image.strip():
+            pixels, mask, path_item = CachePreviewBridge.load_image_from_fileinfo(image)
+            
+            # 检查是否成功加载
+            if path_item["filename"] != 'empty.png':
+                return {
+                    "ui": {"images": [path_item]},
+                    "result": (pixels, mask),
+                }
+        
+        # 情况3: 检查是否有缓存
+        if unique_id in preview_bridge_cache:
+            cached_images, cached_ui = preview_bridge_cache[unique_id]
+            # 返回 64*64 遮罩表示无效遮罩
+            mask = torch.zeros((1, 64, 64), dtype=torch.float32, device="cpu")
+            return {
+                "ui": {"images": cached_ui},
+                "result": (cached_images, mask),
+            }
+        
+        # 情况4: 没有任何数据 - 返回空图像和 64*64 遮罩
         empty_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32, device="cpu")
-        empty_mask = torch.zeros((1, 512, 512), dtype=torch.float32, device="cpu")
+        empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32, device="cpu")
         return {
             "ui": {"images": []},
             "result": (empty_image, empty_mask),
