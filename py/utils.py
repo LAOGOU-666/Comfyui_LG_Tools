@@ -413,6 +413,8 @@ class LG_LoadImage(LoadImage):
         files = folder_paths.filter_files_content_types(files, ["image"])
         return {"required":
                     {"image": (sorted(files), {"image_upload": True}),
+                     "refresh_path": (["output", "temp"], {"default": "output"}),
+                     "auto_refresh": ("BOOLEAN", {"default": True}),
                     },
                 }
 
@@ -423,11 +425,11 @@ class LG_LoadImage(LoadImage):
     FUNCTION = "load_image"
 
     @classmethod
-    def IS_CHANGED(s, image):
+    def IS_CHANGED(s, image, refresh_path, auto_refresh):
         # 调用父类的IS_CHANGED方法
         return LoadImage.IS_CHANGED(image)
 
-    def load_image(self, image):
+    def load_image(self, image, refresh_path, auto_refresh):
         # 调用父类方法获取完整的图像和遮罩
         image_tensor, mask_tensor = super().load_image(image)
         

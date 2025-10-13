@@ -397,33 +397,53 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function() {
             const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
             
-            // 使用多按钮组件创建刷新按钮
-            const refreshWidget = this.addCustomWidget(MultiButtonWidget(app, "Refresh From", {
-                labelWidth: 80,
-                buttonSpacing: 4
-            }, [
-                {
-                    text: "Temp",
-                    callback: () => {
-                        loadLatestImage(this, "temp").then(success => {
-                            if (success) {
-                                app.graph.setDirtyCanvas(true);
-                            }
-                        });
+            // 使用ComfyUI原生addWidget创建刷新按钮
+            const refreshWidget = this.addWidget("button", "refresh", null, () => {
+                // 获取refresh_path widget的值
+                const refreshPathWidget = this.widgets.find(w => w.name === 'refresh_path');
+                const folderType = refreshPathWidget ? refreshPathWidget.value : "output";
+                
+                loadLatestImage(this, folderType).then(success => {
+                    if (success) {
+                        app.graph.setDirtyCanvas(true);
                     }
-                },
-                {
-                    text: "Output",
-                    callback: () => {
-                        loadLatestImage(this, "output").then(success => {
-                            if (success) {
-                                app.graph.setDirtyCanvas(true);
-                            }
-                        });
-                    }
-                }
-            ]));
+                });
+            });
             refreshWidget.serialize = false;
+            
+            // 监听工作流执行成功事件，实现自动刷新
+            const onExecutionSuccess = (event) => {
+                // 获取auto_refresh widget的值
+                const autoRefreshWidget = this.widgets.find(w => w.name === 'auto_refresh');
+                const shouldAutoRefresh = autoRefreshWidget ? autoRefreshWidget.value : true;
+                
+                if (shouldAutoRefresh) {
+                    // 获取refresh_path widget的值
+                    const refreshPathWidget = this.widgets.find(w => w.name === 'refresh_path');
+                    const folderType = refreshPathWidget ? refreshPathWidget.value : "output";
+                    
+                    // 延迟一小段时间，确保文件已经写入
+                    setTimeout(() => {
+                        loadLatestImage(this, folderType).then(success => {
+                            if (success) {
+                                app.graph.setDirtyCanvas(true);
+                            }
+                        });
+                    }, 300);
+                }
+            };
+            
+            // 添加事件监听器 - 监听整个工作流执行成功
+            api.addEventListener("execution_success", onExecutionSuccess);
+            
+            // 保存清理函数，在节点被移除时移除监听器
+            const onRemoved = this.onRemoved;
+            this.onRemoved = function() {
+                api.removeEventListener("execution_success", onExecutionSuccess);
+                if (onRemoved) {
+                    onRemoved.apply(this, arguments);
+                }
+            };
             
             return result;
         };
