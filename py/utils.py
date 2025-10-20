@@ -405,6 +405,9 @@ class IPAdapterWeightTypes:
     def get_weight_types(self, weight_type):
         return (weight_type,)
 
+# 存储每个节点的基准图片信息
+loadimage_baseline = {}
+
 class LG_LoadImage(LoadImage):
     @classmethod
     def INPUT_TYPES(s):
@@ -413,23 +416,87 @@ class LG_LoadImage(LoadImage):
         files = folder_paths.filter_files_content_types(files, ["image"])
         return {"required":
                     {"image": (sorted(files), {"image_upload": True}),
-                     "refresh_path": (["output", "temp"], {"default": "output"}),
                      "auto_refresh": ("BOOLEAN", {"default": True}),
                     },
+                "hidden": {"unique_id": "UNIQUE_ID"},
                 }
 
     RETURN_TYPES = ("IMAGE", "MASK", "STRING")
     RETURN_NAMES = ("image", "mask", "filename")
-    DESCRIPTION = "从temp或output文件夹加载最新图片并复制到input文件夹。点击刷新按钮时，节点将更新图片列表并自动选择第一张图片，方便快速迭代。"
+    DESCRIPTION = "加载图片节点。auto_refresh开启后，自动加载比当前选择的图片更新的图片。"
     CATEGORY = CATEGORY_TYPE
     FUNCTION = "load_image"
 
     @classmethod
-    def IS_CHANGED(s, image, refresh_path, auto_refresh):
-        # 调用父类的IS_CHANGED方法
+    def IS_CHANGED(s, image, auto_refresh, unique_id):
+        if auto_refresh:
+            # 在auto_refresh模式下，返回浮点数确保每次更新
+            import time
+            return float(time.time())
+        # 否则调用父类的IS_CHANGED方法
         return LoadImage.IS_CHANGED(image)
 
-    def load_image(self, image, refresh_path, auto_refresh):
+    def load_image(self, image, auto_refresh, unique_id):
+        input_dir = folder_paths.get_input_directory()
+        
+        # 如果auto_refresh开启，执行智能加载逻辑
+        if auto_refresh:
+            # 获取当前传入的图片路径和时间戳
+            current_image_path = os.path.join(input_dir, image)
+            
+            if os.path.exists(current_image_path):
+                current_timestamp = os.path.getmtime(current_image_path)
+                
+                # 初始化：第一次运行
+                if unique_id not in loadimage_baseline:
+                    loadimage_baseline[unique_id] = {
+                        "image": image,
+                        "timestamp": current_timestamp,
+                        "last_input_image": image  # 记录上次前端传入的image参数
+                    }
+                    print(f"[LG_LoadImage] 节点 {unique_id} 初始化基准图片: {image}, 时间戳: {current_timestamp}")
+                else:
+                    # 检查用户是否在前端手动选择了新图片
+                    # 比较传入的image和上次传入的image参数（来自前端）
+                    last_input_image = loadimage_baseline[unique_id].get("last_input_image", loadimage_baseline[unique_id]["image"])
+                    
+                    if image != last_input_image:
+                        # 前端的image参数变了，说明用户手动选择了新图片，更新基准
+                        loadimage_baseline[unique_id] = {
+                            "image": image,
+                            "timestamp": current_timestamp,
+                            "last_input_image": image
+                        }
+                        print(f"[LG_LoadImage] 节点 {unique_id} 用户手动选择新图片: {image}, 时间戳: {current_timestamp}")
+                    else:
+                        # 前端的image参数没变，执行自动加载逻辑
+                        baseline_timestamp = loadimage_baseline[unique_id]["timestamp"]
+                        
+                        # 获取所有图片文件
+                        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+                        files = folder_paths.filter_files_content_types(files, ["image"])
+                        
+                        if files:
+                            # 找到所有比基准图片更新的图片
+                            newer_files = [f for f in files if os.path.getmtime(os.path.join(input_dir, f)) > baseline_timestamp]
+                            
+                            if newer_files:
+                                # 从更新的图片中选择最新的
+                                latest_file = max(newer_files, key=lambda f: os.path.getmtime(os.path.join(input_dir, f)))
+                                latest_timestamp = os.path.getmtime(os.path.join(input_dir, latest_file))
+                                
+                                # 更新基准为新加载的图片（但保持last_input_image不变）
+                                loadimage_baseline[unique_id]["image"] = latest_file
+                                loadimage_baseline[unique_id]["timestamp"] = latest_timestamp
+                                # last_input_image 保持不变，因为前端传入的image参数没变
+                                
+                                image = latest_file
+                                print(f"[LG_LoadImage] 节点 {unique_id} 自动加载更新的图片: {image}, 时间戳: {latest_timestamp}")
+                            else:
+                                print(f"[LG_LoadImage] 节点 {unique_id} 没有比基准更新的图片，继续使用基准: {loadimage_baseline[unique_id]['image']}")
+                                # 使用基准图片
+                                image = loadimage_baseline[unique_id]["image"]
+        
         # 调用父类方法获取完整的图像和遮罩
         image_tensor, mask_tensor = super().load_image(image)
         
@@ -437,84 +504,7 @@ class LG_LoadImage(LoadImage):
         return (image_tensor, mask_tensor, image)
 
 
-@PromptServer.instance.routes.get("/lg/get/latest_image")
-async def get_latest_image(request):
-    try:
-        folder_type = request.query.get("type", "temp")
-        
-        if folder_type == "temp":
-            target_dir = folder_paths.get_temp_directory()
-        elif folder_type == "output":
-            target_dir = folder_paths.get_output_directory()
-        else:
-            return web.json_response({"error": f"未知的文件夹类型: {folder_type}"}, status=400)
-        
-        files = [f for f in os.listdir(target_dir) 
-                if os.path.isfile(os.path.join(target_dir, f)) and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-        
-        if not files:
-            return web.json_response({"error": f"在{folder_type}目录中未找到图像"}, status=404)
-            
-        latest_file = max(files, key=lambda f: os.path.getmtime(os.path.join(target_dir, f)))
-        
-        return web.json_response({
-            "filename": latest_file,
-            "subfolder": "",
-            "type": folder_type
-        })
-    except Exception as e:
-        print(f"[PreviewBridge] 获取最新图像出错: {str(e)}")
-        traceback.print_exc()
-        return web.json_response({"error": str(e)}, status=500)
-
-# 添加新的API路由，用于从temp/output复制图片到input
-@PromptServer.instance.routes.post("/lg/copy_to_input")
-async def copy_to_input(request):
-    try:
-        json_data = await request.json()
-        folder_type = json_data.get("type", "temp")
-        filename = json_data.get("filename")
-        
-        if not filename:
-            return web.json_response({"error": "未指定文件名"}, status=400)
-        
-        # 确定源目录
-        if folder_type == "temp":
-            source_dir = folder_paths.get_temp_directory()
-        elif folder_type == "output":
-            source_dir = folder_paths.get_output_directory()
-        else:
-            return web.json_response({"error": f"未知的文件夹类型: {folder_type}"}, status=400)
-        
-        # 源文件完整路径
-        source_path = os.path.join(source_dir, filename)
-        if not os.path.exists(source_path):
-            return web.json_response({"error": f"文件不存在: {source_path}"}, status=404)
-        
-        # 目标目录为input
-        target_dir = folder_paths.get_input_directory()
-        
-        # 使用原始文件名
-        target_filename = filename
-        target_path = os.path.join(target_dir, target_filename)
-        
-        # 复制文件
-        import shutil
-        shutil.copy2(source_path, target_path)
-
-        
-        return web.json_response({
-            "success": True,
-            "filename": target_filename,
-            "subfolder": "",
-            "type": "input"
-        })
-    except Exception as e:
-        print(f"[LG_LoadImage] 复制图片到input目录失败: {str(e)}")
-        traceback.print_exc()
-        return web.json_response({"error": str(e)}, status=500)
-
-# 在现有的API路由后添加删除文件的路由
+# API路由：删除文件
 @PromptServer.instance.routes.delete("/lg/delete_image")
 async def delete_image(request):
     try:
@@ -917,6 +907,160 @@ class LG_FloatRange:
         rounded_value = round(value, 2)
         return (rounded_value,)
 
+
+
+# 计数器节点状态存储
+counter_states = {}
+
+class LG_Counter:
+    """计数器节点"""
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "total": ("INT", {
+                    "default": 10, 
+                    "min": 1, 
+                    "max": 10000,
+                    "step": 1
+                }),
+                "mode": (["increase", "decrease"], {
+                    "default": "increase"
+                }),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID"
+            }
+        }
+    
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("count",)
+    FUNCTION = "count"
+    CATEGORY = CATEGORY_TYPE
+    
+    @classmethod
+    def IS_CHANGED(s, total, mode, unique_id):
+        # 每次都返回不同的浮点数，确保每次都触发执行
+        import time
+        return float(time.time())
+
+    def count(self, total, mode, unique_id):
+        try:
+            # 初始化或获取当前节点的计数状态
+            if unique_id not in counter_states:
+                counter_states[unique_id] = {
+                    "current": 0 if mode == "increase" else total,
+                    "total": total,
+                    "mode": mode,
+                    "first_run": True
+                }
+                print(f"[Counter] 初始化节点 {unique_id}, 模式: {mode}, 总数: {total}")
+            
+            state = counter_states[unique_id]
+            
+            # 如果total或mode改变了，重置计数器
+            if state["total"] != total or state["mode"] != mode:
+                state["total"] = total
+                state["mode"] = mode
+                state["current"] = 0 if mode == "increase" else total
+                state["first_run"] = True
+                print(f"[Counter] 参数改变，重置节点 {unique_id}, 新模式: {mode}, 新总数: {total}")
+            
+            current_count = state["current"]
+            
+            # 如果不是第一次运行，则先更新计数器再返回
+            if not state["first_run"]:
+                if mode == "increase":
+                    # 递增模式：0 -> total-1, 然后循环回0
+                    state["current"] += 1
+                    if state["current"] >= total:
+                        state["current"] = 0
+                else:
+                    # 递减模式：total -> 0, 然后循环回total
+                    state["current"] -= 1
+                    if state["current"] < 0:
+                        state["current"] = total
+                
+                current_count = state["current"]
+            else:
+                # 第一次运行，标记为非首次
+                state["first_run"] = False
+            
+            print(f"[Counter] 节点 {unique_id} 执行, 返回: {current_count}, 下次: {state['current']}")
+            
+            return (current_count,)
+            
+        except Exception as e:
+            print(f"[Counter] 计数器执行错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return (0,)
+
+# API端点：重置计数器
+@routes.post('/counter/reset')
+async def reset_counter(request):
+    try:
+        data = await request.json()
+        node_id = data.get('node_id')
+        
+        if not node_id:
+            return web.json_response({"status": "error", "message": "节点ID不能为空"}, status=400)
+        
+        print(f"[Counter] 重置请求 - node_id: {node_id}, 类型: {type(node_id)}")
+        print(f"[Counter] 当前存储的keys: {list(counter_states.keys())}")
+        
+        # 重置计数器状态 - 检查字符串和整数格式
+        found = False
+        target_key = None
+        
+        # 先直接查找
+        if node_id in counter_states:
+            target_key = node_id
+            found = True
+        # 尝试整数格式
+        elif str(node_id) in counter_states:
+            target_key = str(node_id)
+            found = True
+        # 尝试字符串转整数
+        else:
+            try:
+                int_id = int(node_id)
+                if int_id in counter_states:
+                    target_key = int_id
+                    found = True
+            except (ValueError, TypeError):
+                pass
+        
+        if found:
+            state = counter_states[target_key]
+            if state["mode"] == "increase":
+                state["current"] = 0
+            else:
+                state["current"] = state["total"]
+            
+            state["first_run"] = True
+            
+            print(f"[Counter] 重置成功 - 当前值: {state['current']}")
+            
+            return web.json_response({
+                "status": "success", 
+                "current": state["current"],
+                "message": "计数器已重置"
+            })
+        else:
+            print(f"[Counter] 未找到计数器状态")
+            return web.json_response({
+                "status": "success",
+                "message": "计数器状态不存在，将在下次执行时初始化"
+            })
+            
+    except Exception as e:
+        print(f"[Counter] 重置计数器失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
 NODE_CLASS_MAPPINGS = {
     "CachePreviewBridge": CachePreviewBridge,
     "LG_Noise": LG_Noise,
@@ -927,6 +1071,7 @@ NODE_CLASS_MAPPINGS = {
     "LG_InstallDependencies": LG_InstallDependencies,
     "LG_PipManager": LG_PipManager,
     "LG_FloatRange": LG_FloatRange,
+    "LG_Counter": LG_Counter,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -939,6 +1084,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LG_InstallDependencies": "🎈LG_安装依赖",
     "LG_PipManager": "🎈LG_Pip管理器",
     "LG_FloatRange": "🎈LG_浮点数[0-1]",
+    "LG_Counter": "🎈LG_计数器",
 }
 
 

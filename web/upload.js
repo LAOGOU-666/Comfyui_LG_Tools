@@ -45,60 +45,6 @@ async function deleteImageFile(filename) {
     }
 }
 
-// 加载最新图片 - 参考PB.js的实现方式
-async function loadLatestImage(node, folder_type) {
-    try {
-        // 获取指定目录中的最新图片
-        const res = await api.fetchApi(`/lg/get/latest_image?type=${folder_type}`, { cache: "no-store" });
-        
-        if (res.status === 200) {
-            const item = await res.json();
-            
-            if (item && item.filename) {
-                // 找到图像小部件
-                const imageWidget = node.widgets.find(w => w.name === 'image');
-                if (!imageWidget) return false;
-                
-                // 使用后端API直接复制到input文件夹
-                const copyRes = await api.fetchApi(`/lg/copy_to_input`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        type: folder_type,
-                        filename: item.filename
-                    })
-                });
-                
-                if (copyRes.status === 200) {
-                    const copyData = await copyRes.json();
-                    
-                    if (copyData.success) {
-                        // 获取并更新文件列表
-                        const fileList = await getInputFileList();
-                        if (fileList.length > 0) {
-                            imageWidget.options.values = fileList;
-                        }
-                        
-                        // 更新图像小部件值
-                        imageWidget.value = copyData.filename;
-                        
-                        // 通过回调更新预览图像
-                        if (typeof imageWidget.callback === "function") {
-                            imageWidget.callback(copyData.filename);
-                        }
-                        
-                        // 更新画布
-                        app.graph.setDirtyCanvas(true);
-                        return true;
-                    }
-                }
-            }
-        }
-    } catch (error) {
-        console.error(`加载图像失败: ${error}`);
-    }
-    return false;
-}
 
 // 扩展ContextMenu以支持图片缩略图和删除功能
 function extendContextMenuForThumbnails() {
@@ -392,60 +338,7 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name !== "LG_LoadImage") return;
         
-        const onNodeCreated = nodeType.prototype.onNodeCreated;
-        
-        nodeType.prototype.onNodeCreated = function() {
-            const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
-            
-            // 使用ComfyUI原生addWidget创建刷新按钮
-            const refreshWidget = this.addWidget("button", "refresh", null, () => {
-                // 获取refresh_path widget的值
-                const refreshPathWidget = this.widgets.find(w => w.name === 'refresh_path');
-                const folderType = refreshPathWidget ? refreshPathWidget.value : "output";
-                
-                loadLatestImage(this, folderType).then(success => {
-                    if (success) {
-                        app.graph.setDirtyCanvas(true);
-                    }
-                });
-            });
-            refreshWidget.serialize = false;
-            
-            // 监听工作流执行成功事件，实现自动刷新
-            const onExecutionSuccess = (event) => {
-                // 获取auto_refresh widget的值
-                const autoRefreshWidget = this.widgets.find(w => w.name === 'auto_refresh');
-                const shouldAutoRefresh = autoRefreshWidget ? autoRefreshWidget.value : true;
-                
-                if (shouldAutoRefresh) {
-                    // 获取refresh_path widget的值
-                    const refreshPathWidget = this.widgets.find(w => w.name === 'refresh_path');
-                    const folderType = refreshPathWidget ? refreshPathWidget.value : "output";
-                    
-                    // 延迟一小段时间，确保文件已经写入
-                    setTimeout(() => {
-                        loadLatestImage(this, folderType).then(success => {
-                            if (success) {
-                                app.graph.setDirtyCanvas(true);
-                            }
-                        });
-                    }, 300);
-                }
-            };
-            
-            // 添加事件监听器 - 监听整个工作流执行成功
-            api.addEventListener("execution_success", onExecutionSuccess);
-            
-            // 保存清理函数，在节点被移除时移除监听器
-            const onRemoved = this.onRemoved;
-            this.onRemoved = function() {
-                api.removeEventListener("execution_success", onExecutionSuccess);
-                if (onRemoved) {
-                    onRemoved.apply(this, arguments);
-                }
-            };
-            
-            return result;
-        };
+        // 保持节点的原始行为，不添加额外的前端功能
+        // auto_refresh的逻辑现在完全在后端处理
     }
 });
