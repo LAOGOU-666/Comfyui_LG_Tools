@@ -405,9 +405,6 @@ class IPAdapterWeightTypes:
     def get_weight_types(self, weight_type):
         return (weight_type,)
 
-# 存储每个节点的基准图片信息
-loadimage_baseline = {}
-
 class LG_LoadImage(LoadImage):
     @classmethod
     def INPUT_TYPES(s):
@@ -416,87 +413,21 @@ class LG_LoadImage(LoadImage):
         files = folder_paths.filter_files_content_types(files, ["image"])
         return {"required":
                     {"image": (sorted(files), {"image_upload": True}),
-                     "auto_refresh": ("BOOLEAN", {"default": True}),
                     },
-                "hidden": {"unique_id": "UNIQUE_ID"},
                 }
 
     RETURN_TYPES = ("IMAGE", "MASK", "STRING")
     RETURN_NAMES = ("image", "mask", "filename")
-    DESCRIPTION = "加载图片节点。auto_refresh开启后，自动加载比当前选择的图片更新的图片。"
+    DESCRIPTION = "从temp或output文件夹加载最新图片并复制到input文件夹。点击刷新按钮时，节点将更新图片列表并自动选择第一张图片，方便快速迭代。"
     CATEGORY = CATEGORY_TYPE
     FUNCTION = "load_image"
 
     @classmethod
-    def IS_CHANGED(s, image, auto_refresh, unique_id):
-        if auto_refresh:
-            # 在auto_refresh模式下，返回浮点数确保每次更新
-            import time
-            return float(time.time())
-        # 否则调用父类的IS_CHANGED方法
+    def IS_CHANGED(s, image):
+        # 调用父类的IS_CHANGED方法
         return LoadImage.IS_CHANGED(image)
 
-    def load_image(self, image, auto_refresh, unique_id):
-        input_dir = folder_paths.get_input_directory()
-        
-        # 如果auto_refresh开启，执行智能加载逻辑
-        if auto_refresh:
-            # 获取当前传入的图片路径和时间戳
-            current_image_path = os.path.join(input_dir, image)
-            
-            if os.path.exists(current_image_path):
-                current_timestamp = os.path.getmtime(current_image_path)
-                
-                # 初始化：第一次运行
-                if unique_id not in loadimage_baseline:
-                    loadimage_baseline[unique_id] = {
-                        "image": image,
-                        "timestamp": current_timestamp,
-                        "last_input_image": image  # 记录上次前端传入的image参数
-                    }
-                    print(f"[LG_LoadImage] 节点 {unique_id} 初始化基准图片: {image}, 时间戳: {current_timestamp}")
-                else:
-                    # 检查用户是否在前端手动选择了新图片
-                    # 比较传入的image和上次传入的image参数（来自前端）
-                    last_input_image = loadimage_baseline[unique_id].get("last_input_image", loadimage_baseline[unique_id]["image"])
-                    
-                    if image != last_input_image:
-                        # 前端的image参数变了，说明用户手动选择了新图片，更新基准
-                        loadimage_baseline[unique_id] = {
-                            "image": image,
-                            "timestamp": current_timestamp,
-                            "last_input_image": image
-                        }
-                        print(f"[LG_LoadImage] 节点 {unique_id} 用户手动选择新图片: {image}, 时间戳: {current_timestamp}")
-                    else:
-                        # 前端的image参数没变，执行自动加载逻辑
-                        baseline_timestamp = loadimage_baseline[unique_id]["timestamp"]
-                        
-                        # 获取所有图片文件
-                        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-                        files = folder_paths.filter_files_content_types(files, ["image"])
-                        
-                        if files:
-                            # 找到所有比基准图片更新的图片
-                            newer_files = [f for f in files if os.path.getmtime(os.path.join(input_dir, f)) > baseline_timestamp]
-                            
-                            if newer_files:
-                                # 从更新的图片中选择最新的
-                                latest_file = max(newer_files, key=lambda f: os.path.getmtime(os.path.join(input_dir, f)))
-                                latest_timestamp = os.path.getmtime(os.path.join(input_dir, latest_file))
-                                
-                                # 更新基准为新加载的图片（但保持last_input_image不变）
-                                loadimage_baseline[unique_id]["image"] = latest_file
-                                loadimage_baseline[unique_id]["timestamp"] = latest_timestamp
-                                # last_input_image 保持不变，因为前端传入的image参数没变
-                                
-                                image = latest_file
-                                print(f"[LG_LoadImage] 节点 {unique_id} 自动加载更新的图片: {image}, 时间戳: {latest_timestamp}")
-                            else:
-                                print(f"[LG_LoadImage] 节点 {unique_id} 没有比基准更新的图片，继续使用基准: {loadimage_baseline[unique_id]['image']}")
-                                # 使用基准图片
-                                image = loadimage_baseline[unique_id]["image"]
-        
+    def load_image(self, image):
         # 调用父类方法获取完整的图像和遮罩
         image_tensor, mask_tensor = super().load_image(image)
         
@@ -925,7 +856,7 @@ class LG_Counter:
                     "max": 10000,
                     "step": 1
                 }),
-                "mode": (["increase", "decrease"], {
+                "mode": (["increase", "decrease", "None"], {
                     "default": "increase"
                 }),
             },
@@ -941,12 +872,20 @@ class LG_Counter:
     
     @classmethod
     def IS_CHANGED(s, total, mode, unique_id):
-        # 每次都返回不同的浮点数，确保每次都触发执行
+        # None模式不触发自动更新，只在参数改变时更新
+        if mode == "None":
+            return f"{total}_{mode}"
+        # 其他模式每次都返回不同的浮点数，确保每次都触发执行
         import time
         return float(time.time())
 
     def count(self, total, mode, unique_id):
         try:
+            # None模式：直接返回total的值，不进行计数
+            if mode == "None":
+                print(f"[Counter] 节点 {unique_id} None模式，返回total值: {total}")
+                return (total,)
+            
             # 初始化或获取当前节点的计数状态
             if unique_id not in counter_states:
                 counter_states[unique_id] = {
@@ -1061,6 +1000,103 @@ async def reset_counter(request):
         traceback.print_exc()
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
+# 存储每个节点的基准图片信息
+loadimage_baseline = {}
+
+class LG_LoadImage_V2(LoadImage):
+    @classmethod
+    def INPUT_TYPES(s):
+        input_dir = folder_paths.get_input_directory()
+        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        files = folder_paths.filter_files_content_types(files, ["image"])
+        return {"required":
+                    {"image": (sorted(files), {"image_upload": True}),
+                     "auto_refresh": ("BOOLEAN", {"default": True}),
+                    },
+                "hidden": {"unique_id": "UNIQUE_ID"},
+                }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "mask", "filename")
+    DESCRIPTION = "加载图片节点。auto_refresh开启后，自动加载输入文件夹的最新图片。"
+    CATEGORY = CATEGORY_TYPE
+    FUNCTION = "load_image"
+
+    @classmethod
+    def IS_CHANGED(s, image, auto_refresh, unique_id):
+        if auto_refresh:
+            # 在auto_refresh模式下，返回浮点数确保每次更新
+            import time
+            return float(time.time())
+        # 否则调用父类的IS_CHANGED方法
+        return LoadImage.IS_CHANGED(image)
+
+    def load_image(self, image, auto_refresh, unique_id):
+        input_dir = folder_paths.get_input_directory()
+        
+        # 如果auto_refresh开启，执行智能加载逻辑
+        if auto_refresh:
+            # 获取当前传入的图片路径和时间戳
+            current_image_path = os.path.join(input_dir, image)
+            
+            if os.path.exists(current_image_path):
+                current_timestamp = os.path.getmtime(current_image_path)
+                
+                # 初始化：第一次运行
+                if unique_id not in loadimage_baseline:
+                    loadimage_baseline[unique_id] = {
+                        "image": image,
+                        "timestamp": current_timestamp,
+                        "last_input_image": image  # 记录上次前端传入的image参数
+                    }
+                    print(f"[LG_LoadImage] 节点 {unique_id} 初始化基准图片: {image}, 时间戳: {current_timestamp}")
+                else:
+                    # 检查用户是否在前端手动选择了新图片
+                    # 比较传入的image和上次传入的image参数（来自前端）
+                    last_input_image = loadimage_baseline[unique_id].get("last_input_image", loadimage_baseline[unique_id]["image"])
+                    
+                    if image != last_input_image:
+                        # 前端的image参数变了，说明用户手动选择了新图片，更新基准
+                        loadimage_baseline[unique_id] = {
+                            "image": image,
+                            "timestamp": current_timestamp,
+                            "last_input_image": image
+                        }
+                        print(f"[LG_LoadImage] 节点 {unique_id} 用户手动选择新图片: {image}, 时间戳: {current_timestamp}")
+                    else:
+                        # 前端的image参数没变，执行自动加载逻辑
+                        baseline_timestamp = loadimage_baseline[unique_id]["timestamp"]
+                        
+                        # 获取所有图片文件
+                        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+                        files = folder_paths.filter_files_content_types(files, ["image"])
+                        
+                        if files:
+                            # 找到所有比基准图片更新的图片
+                            newer_files = [f for f in files if os.path.getmtime(os.path.join(input_dir, f)) > baseline_timestamp]
+                            
+                            if newer_files:
+                                # 从更新的图片中选择最新的
+                                latest_file = max(newer_files, key=lambda f: os.path.getmtime(os.path.join(input_dir, f)))
+                                latest_timestamp = os.path.getmtime(os.path.join(input_dir, latest_file))
+                                
+                                # 更新基准为新加载的图片（但保持last_input_image不变）
+                                loadimage_baseline[unique_id]["image"] = latest_file
+                                loadimage_baseline[unique_id]["timestamp"] = latest_timestamp
+                                # last_input_image 保持不变，因为前端传入的image参数没变
+                                
+                                image = latest_file
+                                print(f"[LG_LoadImage] 节点 {unique_id} 自动加载更新的图片: {image}, 时间戳: {latest_timestamp}")
+                            else:
+                                print(f"[LG_LoadImage] 节点 {unique_id} 没有比基准更新的图片，继续使用基准: {loadimage_baseline[unique_id]['image']}")
+                                # 使用基准图片
+                                image = loadimage_baseline[unique_id]["image"]
+        
+        # 调用父类方法获取完整的图像和遮罩
+        image_tensor, mask_tensor = super().load_image(image)
+        
+        # 返回图像、遮罩和文件名
+        return (image_tensor, mask_tensor, image)
 NODE_CLASS_MAPPINGS = {
     "CachePreviewBridge": CachePreviewBridge,
     "LG_Noise": LG_Noise,
@@ -1068,6 +1104,7 @@ NODE_CLASS_MAPPINGS = {
     "LG_LoadImage": LG_LoadImage,
     "LG_LatentBatchToList": LG_LatentBatchToList,
     "LG_SaveImage": LG_SaveImage,
+    "LG_LoadImage_V2": LG_LoadImage_V2,
     "LG_InstallDependencies": LG_InstallDependencies,
     "LG_PipManager": LG_PipManager,
     "LG_FloatRange": LG_FloatRange,
@@ -1081,6 +1118,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LG_LoadImage": "🎈LG_LoadImage",
     "LG_LatentBatchToList": "🎈LG_Latent批次转列表",
     "LG_SaveImage": "🎈LG_SaveImage",
+    "LG_LoadImage_V2": "🎈LG_LoadImage_V2",
     "LG_InstallDependencies": "🎈LG_安装依赖",
     "LG_PipManager": "🎈LG_Pip管理器",
     "LG_FloatRange": "🎈LG_浮点数[0-1]",
