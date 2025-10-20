@@ -881,10 +881,11 @@ class LG_Counter:
 
     def count(self, total, mode, unique_id):
         try:
-            # None模式：直接返回total的值，不进行计数
+            # None模式：直接返回total-1的索引值，不进行计数
             if mode == "None":
-                print(f"[Counter] 节点 {unique_id} None模式，返回total值: {total}")
-                return (total,)
+                index_value = total - 1
+                print(f"[Counter] 节点 {unique_id} None模式，返回索引值: {index_value} (total={total})")
+                return (index_value,)
             
             # 初始化或获取当前节点的计数状态
             if unique_id not in counter_states:
