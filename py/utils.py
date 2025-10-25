@@ -885,6 +885,11 @@ class LG_Counter:
             if mode == "None":
                 index_value = total - 1
                 print(f"[Counter] 节点 {unique_id} None模式，返回索引值: {index_value} (total={total})")
+                # 发送计数到前端
+                PromptServer.instance.send_sync("counter_update", {
+                    "node_id": unique_id,
+                    "count": index_value
+                })
                 return (index_value,)
             
             # 初始化或获取当前节点的计数状态
@@ -928,6 +933,12 @@ class LG_Counter:
                 state["first_run"] = False
             
             print(f"[Counter] 节点 {unique_id} 执行, 返回: {current_count}, 下次: {state['current']}")
+            
+            # 发送计数到前端
+            PromptServer.instance.send_sync("counter_update", {
+                "node_id": unique_id,
+                "count": current_count
+            })
             
             return (current_count,)
             
