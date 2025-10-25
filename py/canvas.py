@@ -200,7 +200,10 @@ class FastCanvas:
         return {
             "required": {},
             "hidden": {"unique_id": "UNIQUE_ID"},
-            "optional": {"fc_data": ("FC_DATA",)}
+            "optional": {
+                "fc_data": ("FC_DATA",),
+                "transform_data": ("TRANSFORM_DATA",)
+            }
         }
 
     RETURN_TYPES = ("IMAGE", "MASK", "TRANSFORM_DATA")
@@ -209,7 +212,7 @@ class FastCanvas:
     CATEGORY = CATEGORY_TYPE
     OUTPUT_NODE = True
 
-    def canvas_execute(self, unique_id, fc_data=None):
+    def canvas_execute(self, unique_id, fc_data=None, transform_data=None):
         try:
             self.node_id = unique_id
             
@@ -231,7 +234,8 @@ class FastCanvas:
                 PromptServer.instance.send_sync(
                     "fast_canvas_update", {
                         "node_id": unique_id,
-                        "canvas_data": fc_data
+                        "canvas_data": fc_data,
+                        "transform_data": transform_data  # 传递transform_data到前端
                     }
                 )
                 self.last_fc_data = fc_data
@@ -530,14 +534,72 @@ class FastCanvasComposite:
             return (bg_img, torch.ones_like(mask[0]))
 
 
+class TransformDataFromString:
+    """从字符串创建 transform_data"""
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "json_string": ("STRING", {
+                    "multiline": True,
+                    "default": """{
+    "background": {
+        "width": 1024,
+        "height": 768
+    },
+    "1": {
+        "centerX": 512,
+        "centerY": 384,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "angle": 0,
+        "flipX": false,
+        "flipY": false,
+        "width": 256,
+        "height": 256
+    }
+}"""
+                }),
+            }
+        }
+    
+    RETURN_TYPES = ("TRANSFORM_DATA",)
+    RETURN_NAMES = ("transform_data",)
+    FUNCTION = "create_transform_data"
+    CATEGORY = CATEGORY_TYPE
+    
+    def create_transform_data(self, json_string):
+        try:
+            import json
+            # 解析 JSON 字符串
+            transform_data = json.loads(json_string)
+            
+            # 验证基本结构
+            if not isinstance(transform_data, dict):
+                raise ValueError("transform_data 必须是一个字典对象")
+            
+            print(f"[TransformDataFromString] 成功解析 transform_data: {transform_data}")
+            return (transform_data,)
+            
+        except json.JSONDecodeError as e:
+            print(f"[TransformDataFromString] JSON 解析错误: {str(e)}")
+            # 返回一个默认的空 transform_data
+            return ({},)
+        except Exception as e:
+            print(f"[TransformDataFromString] 错误: {str(e)}")
+            return ({},)
+
 NODE_CLASS_MAPPINGS = {
     "FastCanvasTool": FastCanvasTool,
     "FastCanvas": FastCanvas,
     "FastCanvasComposite": FastCanvasComposite,
+    "TransformDataFromString": TransformDataFromString,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FastCanvasTool": "🎈FastCanvasTool",
     "FastCanvas": "🎈FastCanvas",
     "FastCanvasComposite": "🎈FastCanvasComposite",
+    "TransformDataFromString": "🎈TransformData From String",
 } 

@@ -55,7 +55,7 @@ function setupGlobalEventHandling() {
         if (!instance) return;
 
         if (data.canvas_data) {
-            await instance.updateCanvas(data.canvas_data);
+            await instance.updateCanvas(data.canvas_data, data.transform_data);
         } else {
             await instance.sendCanvasState();
         }
@@ -1060,21 +1060,23 @@ class FastCanvas {
     }
 
 
-    async updateCanvas(canvasData) {
+    async updateCanvas(canvasData, transformData = null) {
         if (!canvasData) return;
 
         try {
-            // 先获取当前所有图层的状态
-            const currentLayers = this.canvas.getObjects().map(obj => ({
+            // 先获取当前所有图层的状态（只在没有传入transformData时保留状态）
+            const currentLayers = !transformData ? this.canvas.getObjects().map(obj => ({
                 object: obj,
                 state: {
                     left: obj.left,
                     top: obj.top,
                     scaleX: obj.scaleX,
                     scaleY: obj.scaleY,
-                    angle: obj.angle
+                    angle: obj.angle,
+                    flipX: obj.flipX,
+                    flipY: obj.flipY
                 }
-            }));
+            })) : [];
     
             // 先设置背景
             if (canvasData.background) {
@@ -1085,13 +1087,18 @@ class FastCanvas {
             if (canvasData.layers) {
                 await this.updateLayers(canvasData.layers);
                 
-                // 恢复图层状态
-                currentLayers.forEach(({object, state}) => {
-                    const existingObj = this.canvas.getObjects().find(obj => obj.id === object.id);
-                    if (existingObj) {
-                        existingObj.set(state);
-                    }
-                });
+                // 如果有transformData，应用变换数据
+                if (transformData) {
+                    this.applyTransformData(transformData);
+                } else {
+                    // 否则恢复图层状态
+                    currentLayers.forEach(({object, state}) => {
+                        const existingObj = this.canvas.getObjects().find(obj => obj.id === object.id);
+                        if (existingObj) {
+                            existingObj.set(state);
+                        }
+                    });
+                }
             }
     
             // 确保画布完全渲染
@@ -1103,7 +1110,59 @@ class FastCanvas {
             });
             await this.sendCanvasState();
         } catch (error) {
+            console.error('[FastCanvas] updateCanvas error:', error);
+        }
+    }
 
+    // 应用变换数据到图层
+    applyTransformData(transformData) {
+        if (!transformData) return;
+        
+        try {
+            // 遍历transform_data中的每个图层
+            for (const [layerId, trans] of Object.entries(transformData)) {
+                // 跳过background
+                if (layerId === 'background') continue;
+                
+                // 查找对应的图层对象
+                const layerObj = this.layers.get(parseInt(layerId));
+                if (!layerObj) {
+                    console.warn(`[FastCanvas] Layer ${layerId} not found`);
+                    continue;
+                }
+                
+                // 应用变换参数
+                const updates = {
+                    originX: 'center',
+                    originY: 'center'
+                };
+                
+                // 设置中心点位置
+                if (trans.centerX !== undefined) updates.left = trans.centerX;
+                if (trans.centerY !== undefined) updates.top = trans.centerY;
+                
+                // 缩放
+                if (trans.scaleX !== undefined) updates.scaleX = trans.scaleX;
+                if (trans.scaleY !== undefined) updates.scaleY = trans.scaleY;
+                
+                // 旋转（注意：fabric.js使用正角度，transform_data可能需要调整）
+                if (trans.angle !== undefined) updates.angle = trans.angle;
+                
+                // 翻转
+                if (trans.flipX !== undefined) updates.flipX = trans.flipX;
+                if (trans.flipY !== undefined) updates.flipY = trans.flipY;
+                
+                // 应用所有变换
+                layerObj.set(updates);
+                layerObj.setCoords(); // 更新对象坐标
+            }
+            
+            // 渲染画布
+            this.canvas.renderAll();
+            
+            console.log('[FastCanvas] Applied transform data to layers');
+        } catch (error) {
+            console.error('[FastCanvas] Error applying transform data:', error);
         }
     }
 
