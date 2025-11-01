@@ -843,6 +843,295 @@ class LG_FloatRange:
 # 计数器节点状态存储
 counter_states = {}
 
+# 图片加载器计数器状态存储
+image_loader_counter_states = {}
+
+class LG_ImageLoaderWithCounter:
+    """
+    带计数器的图片加载器节点
+    从文件夹加载图片，内置计数器功能和多种排序模式
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "folder_path": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "图片文件夹路径（支持相对路径和绝对路径）"
+                }),
+                "mode": (["increase", "decrease", "all"], {
+                    "default": "increase",
+                    "tooltip": "increase: 递增模式，decrease: 递减模式，all: 加载所有图像"
+                }),
+                "sort_mode": (["Alphabetical (ASC)", "Alphabetical (DESC)", "Numerical (ASC)", "Numerical (DESC)", "Datetime (ASC)", "Datetime (DESC)"], {
+                    "default": "Alphabetical (ASC)",
+                    "tooltip": "图片排序方式"
+                }),
+                "keep_index": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "开启时保持当前索引不变，关闭时恢复正常递增/递减"
+                }),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID"
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "INT")
+    RETURN_NAMES = ("images", "masks", "filenames", "current_index", "total_images")
+    OUTPUT_IS_LIST = (True, True, True, False, False)
+    FUNCTION = "load_image_with_counter"
+    CATEGORY = CATEGORY_TYPE
+    DESCRIPTION = "从文件夹加载图片，内置计数器自动获取文件夹总数，支持递增/递减/全部加载模式和多种排序方式"
+    
+    @classmethod
+    def IS_CHANGED(s, folder_path, mode, sort_mode, keep_index, unique_id):
+        """判断节点是否需要重新执行"""
+        # all模式或keep_index开启时不触发自动更新，只在参数改变时更新
+        if mode == "all" or keep_index:
+            return f"{folder_path}_{sort_mode}_{keep_index}"
+        # 其他模式每次都返回不同的浮点数，确保每次都触发执行
+        import time
+        return float(time.time())
+    
+    def get_image_files(self, folder_path, sort_mode):
+        """
+        获取文件夹中的所有图片文件并排序
+        
+        Args:
+            folder_path: 文件夹路径
+            sort_mode: 排序模式
+            
+        Returns:
+            排序后的图片文件列表
+        """
+        import re
+        
+        # 支持的图片格式
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff', '.tif'}
+        
+        # 处理路径
+        if not os.path.isabs(folder_path):
+            # 相对路径：相对于ComfyUI根目录
+            folder_path = os.path.join(os.getcwd(), folder_path)
+        
+        if not os.path.exists(folder_path):
+            print(f"[ImageLoaderCounter] 文件夹不存在: {folder_path}")
+            return []
+        
+        # 获取所有图片文件
+        files = []
+        for f in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, f)
+            if os.path.isfile(file_path):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in image_extensions:
+                    files.append(f)
+        
+        if not files:
+            print(f"[ImageLoaderCounter] 文件夹中没有图片: {folder_path}")
+            return []
+        
+        # 根据排序模式排序
+        if sort_mode == "Alphabetical (ASC)":
+            files.sort()
+        elif sort_mode == "Alphabetical (DESC)":
+            files.sort(reverse=True)
+        elif sort_mode == "Numerical (ASC)":
+            # 提取数字排序
+            def extract_number(filename):
+                numbers = re.findall(r'\d+', filename)
+                return int(numbers[0]) if numbers else 0
+            files.sort(key=extract_number)
+        elif sort_mode == "Numerical (DESC)":
+            def extract_number(filename):
+                numbers = re.findall(r'\d+', filename)
+                return int(numbers[0]) if numbers else 0
+            files.sort(key=extract_number, reverse=True)
+        elif sort_mode == "Datetime (ASC)":
+            # 按文件修改时间排序
+            files.sort(key=lambda f: os.path.getmtime(os.path.join(folder_path, f)))
+        elif sort_mode == "Datetime (DESC)":
+            files.sort(key=lambda f: os.path.getmtime(os.path.join(folder_path, f)), reverse=True)
+        
+        return files
+    
+    def load_image_with_counter(self, folder_path, mode, sort_mode, keep_index, unique_id):
+        """
+        加载图片并应用计数器逻辑
+        """
+        try:
+            # 处理路径
+            if not os.path.isabs(folder_path):
+                folder_path = os.path.join(os.getcwd(), folder_path)
+            
+            # 获取排序后的图片列表
+            image_files = self.get_image_files(folder_path, sort_mode)
+            total_images = len(image_files)
+            
+            if total_images == 0:
+                print(f"[ImageLoaderCounter] 文件夹中没有图片")
+                # 返回空图像列表
+                empty_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32, device="cpu")
+                empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32, device="cpu")
+                return ([empty_image], [empty_mask], [""], 0, 0)
+            
+            # all模式：加载所有图片
+            if mode == "all":
+                print(f"[ImageLoaderCounter] 节点 {unique_id} all模式，加载所有图片: {total_images}张")
+                
+                images_list = []
+                masks_list = []
+                filenames_list = []
+                
+                for idx, filename in enumerate(image_files):
+                    image_path = os.path.join(folder_path, filename)
+                    
+                    # 使用PIL加载图片
+                    img = Image.open(image_path)
+                    img = ImageOps.exif_transpose(img)
+                    
+                    # 转换为RGB
+                    if img.mode == 'I':
+                        img = img.point(lambda i: i * (1 / 255))
+                    image = img.convert("RGB")
+                    
+                    # 转换为tensor
+                    image_np = np.array(image).astype(np.float32) / 255.0
+                    image_tensor = torch.from_numpy(image_np)[None,]
+                    
+                    # 处理mask
+                    if 'A' in img.getbands():
+                        mask = np.array(img.getchannel('A')).astype(np.float32) / 255.0
+                        mask = 1. - torch.from_numpy(mask)
+                    else:
+                        mask = torch.zeros((image_tensor.shape[1], image_tensor.shape[2]), dtype=torch.float32, device="cpu")
+                    
+                    # 确保mask是正确的维度
+                    if len(mask.shape) == 2:
+                        mask = mask.unsqueeze(0)
+                    
+                    images_list.append(image_tensor)
+                    masks_list.append(mask)
+                    filenames_list.append(filename)
+                    
+                    print(f"[ImageLoaderCounter] 加载 {idx+1}/{total_images}: {filename}")
+                
+                # 发送状态到前端
+                PromptServer.instance.send_sync("counter_update", {
+                    "node_id": unique_id,
+                    "count": total_images,
+                    "total": total_images
+                })
+                
+                return (images_list, masks_list, filenames_list, total_images, total_images)
+            
+            # 确定当前索引（递增/递减模式）
+            current_index = 0
+            
+            # 初始化或获取当前节点的计数状态
+            if unique_id not in image_loader_counter_states:
+                image_loader_counter_states[unique_id] = {
+                    "current": 0 if mode == "increase" else total_images - 1,
+                    "total": total_images,
+                    "mode": mode,
+                    "sort_mode": sort_mode,
+                    "folder_path": folder_path,
+                    "first_run": True
+                }
+                print(f"[ImageLoaderCounter] 初始化节点 {unique_id}, 模式: {mode}, 总数: {total_images}")
+            
+            state = image_loader_counter_states[unique_id]
+            
+            # 如果参数改变了，重置计数器
+            if (state["total"] != total_images or 
+                state["mode"] != mode or 
+                state["sort_mode"] != sort_mode or
+                state["folder_path"] != folder_path):
+                state["total"] = total_images
+                state["mode"] = mode
+                state["sort_mode"] = sort_mode
+                state["folder_path"] = folder_path
+                state["current"] = 0 if mode == "increase" else total_images - 1
+                state["first_run"] = True
+                print(f"[ImageLoaderCounter] 参数改变，重置节点 {unique_id}, 新模式: {mode}, 新总数: {total_images}")
+            
+            current_index = state["current"]
+            
+            # 如果开启了keep_index，不更新计数器，保持当前索引
+            if keep_index:
+                print(f"[ImageLoaderCounter] 节点 {unique_id} keep_index开启，保持索引: {current_index}/{total_images}")
+            # 如果不是第一次运行且没有开启keep_index，则更新计数器
+            elif not state["first_run"]:
+                if mode == "increase":
+                    # 递增模式：0 -> total-1, 然后循环回0
+                    state["current"] += 1
+                    if state["current"] >= total_images:
+                        state["current"] = 0
+                else:  # decrease
+                    # 递减模式：total-1 -> 0, 然后循环回total-1
+                    state["current"] -= 1
+                    if state["current"] < 0:
+                        state["current"] = total_images - 1
+                
+                current_index = state["current"]
+                print(f"[ImageLoaderCounter] 节点 {unique_id} 执行, 返回索引: {current_index}, 下次: {state['current']}")
+            else:
+                # 第一次运行，标记为非首次
+                state["first_run"] = False
+                print(f"[ImageLoaderCounter] 节点 {unique_id} 首次执行, 索引: {current_index}/{total_images}")
+            
+            # 加载对应索引的图片
+            filename = image_files[current_index]
+            image_path = os.path.join(folder_path, filename)
+            
+            # 使用PIL加载图片
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            
+            # 转换为RGB
+            if img.mode == 'I':
+                img = img.point(lambda i: i * (1 / 255))
+            image = img.convert("RGB")
+            
+            # 转换为tensor
+            image_np = np.array(image).astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_np)[None,]
+            
+            # 处理mask
+            if 'A' in img.getbands():
+                mask = np.array(img.getchannel('A')).astype(np.float32) / 255.0
+                mask = 1. - torch.from_numpy(mask)
+            else:
+                mask = torch.zeros((image_tensor.shape[1], image_tensor.shape[2]), dtype=torch.float32, device="cpu")
+            
+            # 确保mask是正确的维度
+            if len(mask.shape) == 2:
+                mask = mask.unsqueeze(0)
+            
+            print(f"[ImageLoaderCounter] 加载图片: {filename}, 索引: {current_index}/{total_images}")
+            
+            # 发送状态到前端，包含当前索引和总数
+            PromptServer.instance.send_sync("counter_update", {
+                "node_id": unique_id,
+                "count": current_index,
+                "total": total_images
+            })
+            
+            # 返回列表格式（与all模式保持一致）
+            return ([image_tensor], [mask], [filename], current_index, total_images)
+            
+        except Exception as e:
+            print(f"[ImageLoaderCounter] 加载图片失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # 返回空图像列表
+            empty_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32, device="cpu")
+            empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32, device="cpu")
+            return ([empty_image], [empty_mask], [""], 0, 0)
+
 class LG_Counter:
     """计数器节点"""
     
@@ -1012,6 +1301,75 @@ async def reset_counter(request):
         traceback.print_exc()
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
+# API端点：重置图片加载器计数器
+@routes.post('/image_loader_counter/reset')
+async def reset_image_loader_counter(request):
+    """
+    重置图片加载器计数器状态
+    """
+    try:
+        data = await request.json()
+        node_id = data.get('node_id')
+        
+        if not node_id:
+            return web.json_response({"status": "error", "message": "节点ID不能为空"}, status=400)
+        
+        print(f"[ImageLoaderCounter] 重置请求 - node_id: {node_id}, 类型: {type(node_id)}")
+        print(f"[ImageLoaderCounter] 当前存储的keys: {list(image_loader_counter_states.keys())}")
+        
+        # 重置计数器状态 - 检查字符串和整数格式
+        found = False
+        target_key = None
+        
+        # 先直接查找
+        if node_id in image_loader_counter_states:
+            target_key = node_id
+            found = True
+        # 尝试整数格式
+        elif str(node_id) in image_loader_counter_states:
+            target_key = str(node_id)
+            found = True
+        # 尝试字符串转整数
+        else:
+            try:
+                int_id = int(node_id)
+                if int_id in image_loader_counter_states:
+                    target_key = int_id
+                    found = True
+            except (ValueError, TypeError):
+                pass
+        
+        if found:
+            state = image_loader_counter_states[target_key]
+            if state["mode"] == "increase":
+                state["current"] = 0
+            else:
+                state["current"] = state["total"] - 1
+            
+            state["first_run"] = True
+            
+            print(f"[ImageLoaderCounter] 重置成功 - 当前索引: {state['current']}/{state['total']}")
+            
+            return web.json_response({
+                "status": "success", 
+                "current": state["current"],
+                "total": state["total"],
+                "message": "图片加载器计数器已重置"
+            })
+        else:
+            print(f"[ImageLoaderCounter] 未找到计数器状态")
+            return web.json_response({
+                "status": "success",
+                "current": 0,
+                "message": "计数器状态不存在，将在下次执行时初始化"
+            })
+            
+    except Exception as e:
+        print(f"[ImageLoaderCounter] 重置计数器失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
 # 存储每个节点的基准图片信息
 loadimage_baseline = {}
 
@@ -1121,6 +1479,7 @@ NODE_CLASS_MAPPINGS = {
     "LG_PipManager": LG_PipManager,
     "LG_FloatRange": LG_FloatRange,
     "LG_Counter": LG_Counter,
+    "LG_ImageLoaderWithCounter": LG_ImageLoaderWithCounter,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1135,6 +1494,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LG_PipManager": "🎈LG_Pip管理器",
     "LG_FloatRange": "🎈LG_浮点数[0-1]",
     "LG_Counter": "🎈LG_计数器",
+    "LG_ImageLoaderWithCounter": "🎈LG_图片列表加载器",
 }
 
 
