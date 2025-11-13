@@ -388,22 +388,6 @@ class LG_Noise:
         result = image * (1 - mask) + result * mask
         return (result,)
 
-WEIGHT_TYPES = ["linear", "ease in", "ease out", 'ease in-out', 'reverse in-out', 'weak input', 'weak output', 'weak middle', 'strong middle', 'style transfer', 'composition', 'strong style transfer', 'style and composition', 'style transfer precise', 'composition precise']
-
-class IPAdapterWeightTypes:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-            "weight_type": (WEIGHT_TYPES, ),
-        }}
-    
-    RETURN_TYPES = (AlwaysEqualProxy('*'),)
-    RETURN_NAMES = ("weight_type",)
-    FUNCTION = "get_weight_types"
-    CATEGORY = CATEGORY_TYPE
-
-    def get_weight_types(self, weight_type):
-        return (weight_type,)
 
 class LG_LoadImage(LoadImage):
     @classmethod
@@ -1467,10 +1451,111 @@ class LG_LoadImage_V2(LoadImage):
         
         # 返回图像、遮罩和文件名
         return (image_tensor, mask_tensor, image)
+    
+class LG_MaskHoleFiller:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mask": ("MASK",),  # 输入维度: (B, H, W)
+            }
+        }
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("filled_mask",)
+    FUNCTION = "fill_mask_holes"
+    CATEGORY = "mask"
+
+    def fill_mask_holes(self, mask):
+        filled_masks = []
+        for i in range(mask.shape[0]):
+            mask_np = (mask[i].cpu().numpy() > 0.5).astype(np.uint8)
+            h, w = mask_np.shape
+
+            # 创建一个新图像用于floodFill，必须比原图大2
+            floodfill = mask_np.copy()
+            mask_ff = np.zeros((h + 2, w + 2), np.uint8)
+
+            # 从(0,0)点进行floodFill，填充外部
+            cv2.floodFill(floodfill, mask_ff, (0, 0), 1)
+
+            # floodfill==0的地方是原本的空洞
+            holes = (floodfill == 0).astype(np.uint8)
+
+            # 原mask加上空洞部分
+            filled = np.clip(mask_np + holes, 0, 1)
+            filled_tensor = torch.from_numpy(filled).float()
+            filled_masks.append(filled_tensor)
+
+        filled_mask = torch.stack(filled_masks)
+        return (filled_mask,)
+
+class LG_MaskBatchMerge:
+    """合并批次遮罩节点 - 将批次中的多个遮罩合并为单个遮罩"""
+
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "masks": ("MASK",),  # 输入维度: (B, H, W)
+                "merge_mode": (["max", "min", "average", "sum"], {
+                    "default": "max"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("merged_mask",)
+    FUNCTION = "merge_masks"
+    CATEGORY = CATEGORY_TYPE
+    DESCRIPTION = "合并批次遮罩为单个遮罩。支持最大值、最小值、平均值和求和四种合并模式。"
+
+    def merge_masks(self, masks, merge_mode):
+        """
+        合并批次遮罩
+
+        参数:
+            masks: 输入的批次遮罩，形状为 (B, H, W)
+            merge_mode: 合并模式
+                - "max": 取所有遮罩的最大值（并集）
+                - "min": 取所有遮罩的最小值（交集）
+                - "average": 取所有遮罩的平均值
+                - "sum": 取所有遮罩的和（会被裁剪到0-1范围）
+
+        返回:
+            merged_mask: 合并后的遮罩，形状为 (1, H, W)
+        """
+        if masks.shape[0] == 0:
+            raise ValueError("输入的遮罩批次为空")
+
+        # 根据合并模式处理
+        if merge_mode == "max":
+            # 取最大值 - 相当于遮罩的并集
+            merged = torch.max(masks, dim=0, keepdim=True)[0]
+        elif merge_mode == "min":
+            # 取最小值 - 相当于遮罩的交集
+            merged = torch.min(masks, dim=0, keepdim=True)[0]
+        elif merge_mode == "average":
+            # 取平均值
+            merged = torch.mean(masks, dim=0, keepdim=True)
+        elif merge_mode == "sum":
+            # 求和并裁剪到0-1范围
+            merged = torch.sum(masks, dim=0, keepdim=True)
+            merged = torch.clamp(merged, 0.0, 1.0)
+        else:
+            # 默认使用最大值
+            merged = torch.max(masks, dim=0, keepdim=True)[0]
+
+        return (merged,)
 NODE_CLASS_MAPPINGS = {
     "CachePreviewBridge": CachePreviewBridge,
     "LG_Noise": LG_Noise,
-    "IPAdapterWeightTypes": IPAdapterWeightTypes,
     "LG_LoadImage": LG_LoadImage,
     "LG_LatentBatchToList": LG_LatentBatchToList,
     "LG_SaveImage": LG_SaveImage,
@@ -1480,12 +1565,13 @@ NODE_CLASS_MAPPINGS = {
     "LG_FloatRange": LG_FloatRange,
     "LG_Counter": LG_Counter,
     "LG_ImageLoaderWithCounter": LG_ImageLoaderWithCounter,
+    "LG_MaskHoleFiller": LG_MaskHoleFiller,
+    "LG_MaskBatchMerge": LG_MaskBatchMerge,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CachePreviewBridge": "🎈LG_PreviewBridge",
     "LG_Noise": "🎈LG_Noise",
-    "IPAdapterWeightTypes": "🎈IPAdapter权重类型",
     "LG_LoadImage": "🎈LG_LoadImage",
     "LG_LatentBatchToList": "🎈LG_Latent批次转列表",
     "LG_SaveImage": "🎈LG_SaveImage",
@@ -1495,6 +1581,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LG_FloatRange": "🎈LG_浮点数[0-1]",
     "LG_Counter": "🎈LG_计数器",
     "LG_ImageLoaderWithCounter": "🎈LG_图片列表加载器",
+    "LG_MaskHoleFiller": "🎈LG_填充空洞",
+    "LG_MaskBatchMerge": "🎈LG_合并批次遮罩",
 }
 
 

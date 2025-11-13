@@ -23,7 +23,7 @@ def get_ext_dir(subpath=None, mkdir=False):
 def serialize(obj):
     if isinstance(obj, (str, int, float, bool, list, dict, type(None))):
         return obj
-    return str(obj)  # 转为字符串
+    return str(obj)  
 
 
 py = get_ext_dir("py")
