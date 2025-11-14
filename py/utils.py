@@ -999,8 +999,10 @@ class LG_ImageLoaderWithCounter:
                     
                     images_list.append(image_tensor)
                     masks_list.append(mask)
-                    filenames_list.append(filename)
-                    
+                    # 移除文件扩展名
+                    filename_without_ext = os.path.splitext(filename)[0]
+                    filenames_list.append(filename_without_ext)
+
                     print(f"[ImageLoaderCounter] 加载 {idx+1}/{total_images}: {filename}")
                 
                 # 发送状态到前端
@@ -1095,17 +1097,19 @@ class LG_ImageLoaderWithCounter:
             if len(mask.shape) == 2:
                 mask = mask.unsqueeze(0)
             
-            print(f"[ImageLoaderCounter] 加载图片: {filename}, 索引: {current_index}/{total_images}")
-            
-            # 发送状态到前端，包含当前索引和总数
+            print(f"[ImageLoaderCounter] 加载图片: {filename}, 索引: {current_index}/{total_images-1} (第{current_index+1}/{total_images}张)")
+
+            # 发送状态到前端，显示"第几张/总数"（索引+1）
             PromptServer.instance.send_sync("counter_update", {
                 "node_id": unique_id,
-                "count": current_index,
+                "count": current_index + 1,  # 显示第几张（1-based）
                 "total": total_images
             })
             
             # 返回列表格式（与all模式保持一致）
-            return ([image_tensor], [mask], [filename], current_index, total_images)
+            # 移除文件扩展名
+            filename_without_ext = os.path.splitext(filename)[0]
+            return ([image_tensor], [mask], [filename_without_ext], current_index, total_images)
             
         except Exception as e:
             print(f"[ImageLoaderCounter] 加载图片失败: {str(e)}")
@@ -1475,15 +1479,21 @@ class LG_MaskHoleFiller:
             mask_np = (mask[i].cpu().numpy() > 0.5).astype(np.uint8)
             h, w = mask_np.shape
 
-            # 创建一个新图像用于floodFill，必须比原图大2
-            floodfill = mask_np.copy()
-            mask_ff = np.zeros((h + 2, w + 2), np.uint8)
+            # 在遮罩周围添加1像素的边框（值为0），确保外部区域连通
+            padded_mask = np.pad(mask_np, pad_width=1, mode='constant', constant_values=0)
 
-            # 从(0,0)点进行floodFill，填充外部
+            # 创建floodFill所需的mask，必须比padded_mask大2
+            floodfill = padded_mask.copy()
+            mask_ff = np.zeros((h + 4, w + 4), np.uint8)
+
+            # 从(0,0)点进行floodFill，填充外部区域
             cv2.floodFill(floodfill, mask_ff, (0, 0), 1)
 
-            # floodfill==0的地方是原本的空洞
+            # floodfill==0的地方是内部的空洞
             holes = (floodfill == 0).astype(np.uint8)
+
+            # 移除边框，恢复原始尺寸
+            holes = holes[1:-1, 1:-1]
 
             # 原mask加上空洞部分
             filled = np.clip(mask_np + holes, 0, 1)
