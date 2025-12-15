@@ -81,8 +81,53 @@ function setupClipspace(nodeId, urls) {
         clipspace.selectedIndex = 0;
     });
     setTimeout(() => {
-        const openMaskEditor = ComfyApp.open_maskeditor || app.open_maskeditor;
-        openMaskEditor?.();
+        const node = app.graph.getNodeById(parseInt(nodeId));
+        if (!node) {
+            console.error(`[BridgePreview] 无法找到节点 ${nodeId}`);
+            return;
+        }
+        
+        // 选择节点（某些API需要）
+        app.canvas.selectNode(node);
+        
+        let success = false;
+        
+        // 方法1: 尝试通过 app.extensionManager.command (新版首选方式)
+        try {
+            if (app.extensionManager?.command?.execute) {
+                app.extensionManager.command.execute('Comfy.MaskEditor.OpenMaskEditor');
+                console.log('[BridgePreview] 使用extensionManager.command打开mask editor');
+                success = true;
+            }
+        } catch (error) {
+            console.warn('[BridgePreview] extensionManager.command调用失败:', error);
+        }
+        
+        // 方法2: 尝试旧版 open_maskeditor
+        if (!success) {
+            try {
+                const ComfyApp = app.constructor;
+                const openMaskEditor = ComfyApp.open_maskeditor || app.open_maskeditor;
+                if (openMaskEditor && typeof openMaskEditor === 'function') {
+                    openMaskEditor();
+                    console.log('[BridgePreview] 使用旧版API打开mask editor');
+                    success = true;
+                }
+            } catch (error) {
+                console.warn('[BridgePreview] 旧版API调用失败:', error);
+            }
+        }
+        
+        if (!success) {
+            console.error('[BridgePreview] 无法打开mask editor - 所有方法都失败了');
+            console.log('[BridgePreview] 调试信息:', {
+                hasExtensionManager: !!app.extensionManager,
+                hasCommand: !!app.extensionManager?.command,
+                hasExecute: !!app.extensionManager?.command?.execute,
+                hasOpenMaskeditor: !!(app.constructor.open_maskeditor || app.open_maskeditor)
+            });
+        }
+        
         bindCancelButton();
     }, 100);
 }
@@ -209,4 +254,4 @@ setInterval(() => {
         }
     }
 }, 5000);
-console.log("[BridgePreview] 桥接预览模块已加载");
+console.log("[BridgePreview] 桥接预览模块已加载 - 支持新版命令系统");
