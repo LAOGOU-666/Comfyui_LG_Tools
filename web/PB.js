@@ -11,16 +11,17 @@ async function loadLatestImage(node, folder_type) {
 			const imageWidget = node.widgets.find(w => w.name === 'image');
 			if (!imageWidget) return false;
 			
-			// 保存文件信息的JSON字符串
+			// 保存文件信息的JSON字符串到节点属性
 			const fileInfo = JSON.stringify({
 				filename: item.filename,
 				subfolder: item.subfolder || '',
 				type: item.type || 'temp'
 			});
-			
-			// 保存到节点属性和 widget
 			node._latestFileInfo = fileInfo;
-			imageWidget.value = fileInfo;
+			
+			// 设置 widget 值为 ComfyUI 期望的格式: "filename [type]"
+			const displayValue = `${item.filename} [${item.type}]`;
+			imageWidget.value = displayValue;
 			
 			// 加载并显示图像
 			const image = new Image();

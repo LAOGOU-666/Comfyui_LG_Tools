@@ -490,6 +490,59 @@ async def delete_image(request):
         traceback.print_exc()
         return web.json_response({"error": str(e)}, status=500)
 
+# API路由：获取最新图片
+@PromptServer.instance.routes.get("/lg/get/latest_image")
+async def get_latest_image(request):
+    try:
+        folder_type = request.query.get("type", "temp")
+        
+        # 根据类型获取对应的目录
+        if folder_type == "temp":
+            base_dir = folder_paths.get_temp_directory()
+        elif folder_type == "output":
+            base_dir = folder_paths.get_output_directory()
+        elif folder_type == "input":
+            base_dir = folder_paths.get_input_directory()
+        else:
+            return web.json_response({"error": f"不支持的文件夹类型: {folder_type}"}, status=400)
+        
+        if not os.path.exists(base_dir):
+            return web.json_response({"error": f"目录不存在: {base_dir}"}, status=404)
+        
+        # 获取所有图片文件
+        image_files = []
+        for root, dirs, files in os.walk(base_dir):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, base_dir)
+                    subfolder = os.path.dirname(rel_path) if os.path.dirname(rel_path) != '.' else ''
+                    image_files.append({
+                        'filename': file,
+                        'subfolder': subfolder,
+                        'full_path': full_path,
+                        'mtime': os.path.getmtime(full_path)
+                    })
+        
+        if not image_files:
+            return web.json_response({"error": "没有找到图片文件"}, status=404)
+        
+        # 按修改时间排序，获取最新的
+        latest_image = max(image_files, key=lambda x: x['mtime'])
+        
+        return web.json_response({
+            "filename": latest_image['filename'],
+            "subfolder": latest_image['subfolder'],
+            "type": folder_type
+        })
+        
+    except Exception as e:
+        print(f"[get_latest_image] 获取最新图片失败: {str(e)}")
+        traceback.print_exc()
+        return web.json_response({"error": str(e)}, status=500)
+
+# 注意：不再需要复制文件到input目录，ComfyUI可以直接使用temp和output目录的文件
+
 class LG_LatentBatchToList:
     @classmethod
     def INPUT_TYPES(s):
@@ -1400,103 +1453,7 @@ async def reset_image_loader_counter(request):
         traceback.print_exc()
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-# 存储每个节点的基准图片信息
-loadimage_baseline = {}
 
-class LG_LoadImage_V2(LoadImage):
-    @classmethod
-    def INPUT_TYPES(s):
-        input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        files = folder_paths.filter_files_content_types(files, ["image"])
-        return {"required":
-                    {"image": (sorted(files), {"image_upload": True}),
-                     "auto_refresh": ("BOOLEAN", {"default": True}),
-                    },
-                "hidden": {"unique_id": "UNIQUE_ID"},
-                }
-
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("image", "mask", "filename")
-    DESCRIPTION = "加载图片节点。auto_refresh开启后，自动加载输入文件夹的最新图片。"
-    CATEGORY = CATEGORY_TYPE
-    FUNCTION = "load_image"
-
-    @classmethod
-    def IS_CHANGED(s, image, auto_refresh, unique_id):
-        if auto_refresh:
-            # 在auto_refresh模式下，返回浮点数确保每次更新
-            import time
-            return float(time.time())
-        # 否则调用父类的IS_CHANGED方法
-        return LoadImage.IS_CHANGED(image)
-
-    def load_image(self, image, auto_refresh, unique_id):
-        input_dir = folder_paths.get_input_directory()
-        
-        # 如果auto_refresh开启，执行智能加载逻辑
-        if auto_refresh:
-            # 获取当前传入的图片路径和时间戳
-            current_image_path = os.path.join(input_dir, image)
-            
-            if os.path.exists(current_image_path):
-                current_timestamp = os.path.getmtime(current_image_path)
-                
-                # 初始化：第一次运行
-                if unique_id not in loadimage_baseline:
-                    loadimage_baseline[unique_id] = {
-                        "image": image,
-                        "timestamp": current_timestamp,
-                        "last_input_image": image  # 记录上次前端传入的image参数
-                    }
-                    print(f"[LG_LoadImage] 节点 {unique_id} 初始化基准图片: {image}, 时间戳: {current_timestamp}")
-                else:
-                    # 检查用户是否在前端手动选择了新图片
-                    # 比较传入的image和上次传入的image参数（来自前端）
-                    last_input_image = loadimage_baseline[unique_id].get("last_input_image", loadimage_baseline[unique_id]["image"])
-                    
-                    if image != last_input_image:
-                        # 前端的image参数变了，说明用户手动选择了新图片，更新基准
-                        loadimage_baseline[unique_id] = {
-                            "image": image,
-                            "timestamp": current_timestamp,
-                            "last_input_image": image
-                        }
-                        print(f"[LG_LoadImage] 节点 {unique_id} 用户手动选择新图片: {image}, 时间戳: {current_timestamp}")
-                    else:
-                        # 前端的image参数没变，执行自动加载逻辑
-                        baseline_timestamp = loadimage_baseline[unique_id]["timestamp"]
-                        
-                        # 获取所有图片文件
-                        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-                        files = folder_paths.filter_files_content_types(files, ["image"])
-                        
-                        if files:
-                            # 找到所有比基准图片更新的图片
-                            newer_files = [f for f in files if os.path.getmtime(os.path.join(input_dir, f)) > baseline_timestamp]
-                            
-                            if newer_files:
-                                # 从更新的图片中选择最新的
-                                latest_file = max(newer_files, key=lambda f: os.path.getmtime(os.path.join(input_dir, f)))
-                                latest_timestamp = os.path.getmtime(os.path.join(input_dir, latest_file))
-                                
-                                # 更新基准为新加载的图片（但保持last_input_image不变）
-                                loadimage_baseline[unique_id]["image"] = latest_file
-                                loadimage_baseline[unique_id]["timestamp"] = latest_timestamp
-                                # last_input_image 保持不变，因为前端传入的image参数没变
-                                
-                                image = latest_file
-                                print(f"[LG_LoadImage] 节点 {unique_id} 自动加载更新的图片: {image}, 时间戳: {latest_timestamp}")
-                            else:
-                                print(f"[LG_LoadImage] 节点 {unique_id} 没有比基准更新的图片，继续使用基准: {loadimage_baseline[unique_id]['image']}")
-                                # 使用基准图片
-                                image = loadimage_baseline[unique_id]["image"]
-        
-        # 调用父类方法获取完整的图像和遮罩
-        image_tensor, mask_tensor = super().load_image(image)
-        
-        # 返回图像、遮罩和文件名
-        return (image_tensor, mask_tensor, image)
     
 class LG_MaskHoleFiller:
     def __init__(self):
@@ -1611,7 +1568,6 @@ NODE_CLASS_MAPPINGS = {
     "LG_LoadImage": LG_LoadImage,
     "LG_LatentBatchToList": LG_LatentBatchToList,
     "LG_SaveImage": LG_SaveImage,
-    "LG_LoadImage_V2": LG_LoadImage_V2,
     "LG_InstallDependencies": LG_InstallDependencies,
     "LG_PipManager": LG_PipManager,
     "LG_FloatRange": LG_FloatRange,
@@ -1627,7 +1583,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LG_LoadImage": "🎈LG_LoadImage",
     "LG_LatentBatchToList": "🎈LG_Latent批次转列表",
     "LG_SaveImage": "🎈LG_SaveImage",
-    "LG_LoadImage_V2": "🎈LG_LoadImage_V2",
     "LG_InstallDependencies": "🎈LG_安装依赖",
     "LG_PipManager": "🎈LG_Pip管理器",
     "LG_FloatRange": "🎈LG_浮点数[0-1]",

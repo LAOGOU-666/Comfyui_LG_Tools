@@ -59,39 +59,18 @@ async function loadLatestImage(node, folder_type) {
                 const imageWidget = node.widgets.find(w => w.name === 'image');
                 if (!imageWidget) return false;
                 
-                // 使用后端API直接复制到input文件夹
-                const copyRes = await api.fetchApi(`/lg/copy_to_input`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        type: folder_type,
-                        filename: item.filename
-                    })
-                });
+                // 直接使用原始文件，不需要复制到input
+                const displayValue = `${item.filename} [${folder_type}]`;
+                imageWidget.value = displayValue;
                 
-                if (copyRes.status === 200) {
-                    const copyData = await copyRes.json();
-                    
-                    if (copyData.success) {
-                        // 获取并更新文件列表
-                        const fileList = await getInputFileList();
-                        if (fileList.length > 0) {
-                            imageWidget.options.values = fileList;
-                        }
-                        
-                        // 更新图像小部件值
-                        imageWidget.value = copyData.filename;
-                        
-                        // 通过回调更新预览图像
-                        if (typeof imageWidget.callback === "function") {
-                            imageWidget.callback(copyData.filename);
-                        }
-                        
-                        // 更新画布
-                        app.graph.setDirtyCanvas(true);
-                        return true;
-                    }
+                // 通过回调更新预览图像
+                if (typeof imageWidget.callback === "function") {
+                    imageWidget.callback(displayValue);
                 }
+                
+                // 更新画布
+                app.graph.setDirtyCanvas(true);
+                return true;
             }
         }
     } catch (error) {

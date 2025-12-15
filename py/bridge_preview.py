@@ -213,12 +213,20 @@ async def confirm_bridge_preview(request):
         return web.json_response({"success": False, "error": str(e)})
 @PromptServer.instance.routes.post("/bridge_preview/cancel")
 async def cancel_bridge_preview(request):
-    """取消桥接预览操作"""
+    """取消桥接预览操作 - 恢复到上次保存的结果"""
     try:
         data = await request.json()
         node_id = str(data.get("node_id"))
         if node_id in get_bridge_storage():
-            get_bridge_storage()[node_id]["event"].set()
+            node_info = get_bridge_storage()[node_id]
+            cache = get_bridge_cache()
+            
+            # 如果有缓存的最终结果，使用它（保留上次编辑的遮罩）
+            if node_id in cache and cache[node_id].get("final_result"):
+                cached_images, cached_mask = cache[node_id]["final_result"]
+                node_info["result"] = (cached_images, cached_mask)
+            
+            node_info["event"].set()
             return web.json_response({"success": True, "message": f"节点 {node_id} 已取消"})
         else:
             return web.json_response({"success": False, "error": f"节点 {node_id} 未找到或已超时"})
