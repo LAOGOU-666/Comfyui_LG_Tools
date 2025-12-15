@@ -104,7 +104,7 @@ class CachePreviewBridge:
             return None
     @staticmethod
     def load_image_from_fileinfo(file_info_json):
-        """从 JSON 文件信息加载图片"""
+        """从 JSON 文件信息或字符串路径加载图片"""
         # 初始化默认值（64*64 遮罩表示无效遮罩）
         image = torch.zeros((1, 512, 512, 3), dtype=torch.float32, device="cpu")
         mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
@@ -118,17 +118,58 @@ class CachePreviewBridge:
             final_mask = mask.unsqueeze(0) if len(mask.shape) == 2 else mask
             return image, final_mask, ui_item
         
+        filename = None
+        subfolder = ''
+        file_type = 'input'
+        
         try:
-            # 只支持 JSON 格式
+            # 首先尝试作为 JSON 解析（旧版本格式）
             file_info = json.loads(file_info_json)
             filename = file_info.get('filename')
             subfolder = file_info.get('subfolder', '')
             file_type = file_info.get('type', 'input')
             
-            if not filename:
-                final_mask = mask.unsqueeze(0) if len(mask.shape) == 2 else mask
-                return image, final_mask, ui_item
+        except json.JSONDecodeError:
+            # JSON 解析失败，尝试解析新版本字符串格式
+            # 新版本格式: "path/filename.ext [type]" 或 "filename.ext [type]"
+            file_info_str = str(file_info_json).strip()
             
+            # 查找最后的 [type] 部分
+            if '[' in file_info_str and file_info_str.endswith(']'):
+                # 分离路径和类型
+                last_bracket = file_info_str.rfind('[')
+                path_part = file_info_str[:last_bracket].strip()
+                type_part = file_info_str[last_bracket+1:-1].strip()
+                
+                # 解析路径部分
+                if '/' in path_part:
+                    # 包含子文件夹
+                    path_parts = path_part.split('/')
+                    filename = path_parts[-1]  # 最后一部分是文件名
+                    subfolder = '/'.join(path_parts[:-1])  # 前面的部分是子文件夹
+                else:
+                    # 只有文件名
+                    filename = path_part
+                    subfolder = ''
+                
+                # 解析类型
+                file_type = type_part.lower() if type_part else 'input'
+            else:
+                # 没有类型信息，直接作为路径处理
+                if '/' in file_info_str:
+                    path_parts = file_info_str.split('/')
+                    filename = path_parts[-1]
+                    subfolder = '/'.join(path_parts[:-1])
+                else:
+                    filename = file_info_str
+                    subfolder = ''
+                file_type = 'input'  # 默认类型
+        
+        if not filename:
+            final_mask = mask.unsqueeze(0) if len(mask.shape) == 2 else mask
+            return image, final_mask, ui_item
+        
+        try:
             # 构建文件路径
             if file_type == 'input':
                 base_dir = folder_paths.get_input_directory()
@@ -164,6 +205,7 @@ class CachePreviewBridge:
                     mask = 1. - torch.from_numpy(mask)
                 else:
                     mask = torch.zeros((image.shape[1], image.shape[2]), dtype=torch.float32, device="cpu")
+                
         except Exception as e:
             print(f"[CachePreviewBridge] 加载图片失败: {e}")
 

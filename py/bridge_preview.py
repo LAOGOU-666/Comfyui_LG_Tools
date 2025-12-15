@@ -227,16 +227,51 @@ async def cancel_bridge_preview(request):
 def load_processed_image(file_info):
     """从文件信息加载处理后的图片，返回图像和遮罩"""
     try:
+        filename = None
+        subfolder = ""
+        file_type = "output"
+        
         if isinstance(file_info, dict):
             filename = file_info.get("filename")
             subfolder = file_info.get("subfolder", "")
             file_type = file_info.get("type", "output")
         elif isinstance(file_info, str):
-            filename = file_info
-            subfolder = ""
-            file_type = "output"
+            # 尝试解析新版本字符串格式: "path/filename.ext [type]"
+            file_info_str = str(file_info).strip()
+            
+            # 查找最后的 [type] 部分
+            if '[' in file_info_str and file_info_str.endswith(']'):
+                # 分离路径和类型
+                last_bracket = file_info_str.rfind('[')
+                path_part = file_info_str[:last_bracket].strip()
+                type_part = file_info_str[last_bracket+1:-1].strip()
+                
+                # 解析路径部分
+                if '/' in path_part:
+                    # 包含子文件夹
+                    path_parts = path_part.split('/')
+                    filename = path_parts[-1]  # 最后一部分是文件名
+                    subfolder = '/'.join(path_parts[:-1])  # 前面的部分是子文件夹
+                else:
+                    # 只有文件名
+                    filename = path_part
+                    subfolder = ""
+                
+                # 解析类型
+                file_type = type_part.lower() if type_part else "output"
+            else:
+                # 没有类型信息，直接作为路径处理
+                if '/' in file_info_str:
+                    path_parts = file_info_str.split('/')
+                    filename = path_parts[-1]
+                    subfolder = '/'.join(path_parts[:-1])
+                else:
+                    filename = file_info_str
+                    subfolder = ""
+                file_type = "output"  # 默认类型
         else:
             return None, None
+            
         if not filename:
             return None, None
         if file_type == "input":
