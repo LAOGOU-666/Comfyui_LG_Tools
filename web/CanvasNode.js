@@ -3585,5 +3585,64 @@ app.registerExtension({
                 }
             };
         }
+
+        // AFL_PSD_Layer 动态输入处理
+        if (nodeData.name === "AFL2_PSD_Layer") {
+            nodeType.prototype.onConnectionsChange = async function(type, index, connected, link_info) {
+                if (!link_info || type == LiteGraph.OUTPUT) return;
+                
+                const stackTrace = new Error().stack;
+
+                // 处理断开连接
+                if (!connected) {
+                    if (!stackTrace.includes('LGraphNode.prototype.connect') && 
+                        !stackTrace.includes('LGraphNode.connect') && 
+                        !stackTrace.includes('loadGraphData')) {
+                        
+                        if (this.inputs[index]?.name.startsWith("layer_")) {
+                            this.removeInput(index);
+                        }
+                    }
+                }
+        
+                if (connected) {
+                    await app.queuePromise;
+                }
+        
+                // 重新编号图层输入
+                let layerIndex = 1;
+                this.inputs.forEach(input => {
+                    if (input.name.startsWith("layer_")) {
+                        const newName = `layer_${layerIndex}`;
+                        if (input.name !== newName) {
+                            input.name = newName;
+                        }
+                        layerIndex++;
+                    }
+                });
+        
+                // 最后一个端口被连接时添加新端口
+                const layerInputs = this.inputs.filter(input => input.name.startsWith("layer_"));
+                const lastInput = layerInputs[layerInputs.length - 1];
+                
+                if (lastInput?.link != null) {
+                    const newIndex = `layer_${layerIndex}`;
+                    this.addInput(newIndex, "IMAGE");
+                }
+
+                this.setDirtyCanvas(true, true);
+            };
+
+            const onNodeCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function() {
+                if (onNodeCreated) {
+                    onNodeCreated.apply(this, arguments);
+                }
+                
+                if (!this.inputs.find(input => input.name === "layer_1")) {
+                    this.addInput("layer_1", "IMAGE");
+                }
+            };
+        }
     }
 });

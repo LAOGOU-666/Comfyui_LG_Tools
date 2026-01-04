@@ -303,7 +303,7 @@ class LG_Noise:
                 "sharpen": ("INT", { "default": 0, "min": -32, "max": 32, "step": 1 }),
                 "brightness": ("FLOAT", { "default": 1.0, "min": 0, "max": 3, "step": 0.05 }),
                 "random_color": ("BOOLEAN", {"default": True}),
-                "color": ("COLOR", {"default": "#808080"}),
+                "color": ("LGCOLOR", {"default": "#808080"}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 0x7fffffff}),
             },
             "optional": {
@@ -348,7 +348,13 @@ class LG_Noise:
                 else:
                     return torch.rand(1, size_h, size_w, 3, device=image.device)
             else:
-                return torch.ones(1, size_h, size_w, 3, device=image.device)
+                # 单色噪声：生成灰度随机值，RGB通道相同
+                if is_gaussian:
+                    gray = torch.randn(1, size_h, size_w, 1, device=image.device)
+                    gray = torch.clamp(gray * 0.5 + 0.5, 0, 1)
+                else:
+                    gray = torch.rand(1, size_h, size_w, 1, device=image.device)
+                return gray.repeat(1, 1, 1, 3)
         def generate_density_mask(size_h, size_w):
             """统一的密度遮罩生成函数"""
             return (torch.rand(1, size_h, size_w, 1, device=image.device) < density).float()
@@ -429,6 +435,7 @@ class LG_Noise:
         result = torch.clamp(result, 0, 1)
         result = image * (1 - mask) + result * mask
         return (result,)
+
 
 
 class LG_LoadImage(LoadImage):
