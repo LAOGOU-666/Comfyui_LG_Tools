@@ -293,11 +293,11 @@ class ImageRestoreNodeV2:
                 "original_image": ("IMAGE",),
                 "processed_image": ("IMAGE",),
                 "crop_box": ("CROPBOX",),
-                "blur_amount": ("INT", {"default": 0, "min": 0, "max": 500, "step": 1}),
+                "blur_amount": ("INT", {"default": 0, "min": 0, "max": 500, "step": 1, "tooltip": "边缘羽化值，对mask边缘或bbox边缘应用高斯模糊"}),
+                "mask_expand": ("INT", {"default": 0, "min": -500, "max": 500, "step": 1, "tooltip": "遮罩扩展值，正值扩展，负值收缩"}),
             },
             "optional": {
                 "mask": ("MASK",),
-                "mask_protect": ("INT", {"default": 0, "min": 0, "max": 500, "step": 1, "tooltip": "控制输入mask边缘模糊的值，保护mask区域不被blur_amount的腐蚀所影响"}),
             }
         }
     
@@ -359,7 +359,7 @@ class ImageRestoreNodeV2:
         img_np = np.array(pil_image).astype(np.float32) / 255.0
         return torch.from_numpy(img_np)[None,]
     
-    def restore_image(self, original_image, processed_image, crop_box, blur_amount, mask=None, mask_protect=0):
+    def restore_image(self, original_image, processed_image, crop_box, blur_amount, mask_expand, mask=None):
         # 将输入转换为PIL图像
         original_pil = self._tensor_to_pil(original_image)
         processed_pil = self._tensor_to_pil(processed_image)
@@ -391,24 +391,32 @@ class ImageRestoreNodeV2:
             )
             restored_image.paste(original_pil, orig_region)
         
-        # 保存原始填充后图像用于边缘模糊
+        # 保存原始填充后图像用于混合
         padded_original = restored_image.copy()
         
-        # 将处理后的图像粘贴回去
-        restored_image.paste(resized_processed, original_coords[:2])
-        
-        # 应用边缘模糊效果
-        if blur_amount > 0:
-            restored_image = self._apply_edge_blur(
-                restored_image, 
-                padded_original, 
-                original_coords, 
+        # 根据是否有mask决定粘贴方式
+        if mask is not None:
+            # 有mask：只在mask区域粘贴处理后的图像
+            restored_image = self._apply_mask_blend(
+                restored_image,
+                resized_processed,
+                padded_original,
+                original_coords,
+                mask,
                 blur_amount,
-                pad_info,
-                original_image_size,
-                mask,  # 传递mask参数
-                mask_protect  # 传递mask_protect参数
+                mask_expand
             )
+        else:
+            # 无mask：粘贴整个bbox区域，使用边缘模糊
+            restored_image.paste(resized_processed, original_coords[:2])
+            if blur_amount > 0 or mask_expand != 0:
+                restored_image = self._apply_bbox_edge_blur(
+                    restored_image,
+                    padded_original,
+                    original_coords,
+                    blur_amount,
+                    mask_expand
+                )
         
         # 移除padding回到原始尺寸
         if pad_left > 0 or pad_top > 0 or pad_right > 0 or pad_bottom > 0:
@@ -423,155 +431,96 @@ class ImageRestoreNodeV2:
         output_image = self._pil_to_tensor(restored_image)
         return (output_image,)
     
-    def _apply_edge_blur(self, restored_image, original_image, crop_coords, blur_amount, pad_info, original_size, input_mask=None, mask_protect=0):
-        """应用边缘模糊效果，支持mask保护
-        blur_amount: 边缘纯白色的像素数量（从裁剪框边缘向内延伸的宽度，完全透明区域，显示原始图像）
+    def _apply_mask_blend(self, restored_image, resized_processed, original_image, crop_coords, input_mask, blur_amount, mask_expand):
+        """使用mask混合图像，只在mask区域粘贴处理后的图像
+        blur_amount: 对mask边缘应用高斯模糊羽化
+        mask_expand: 遮罩扩展值，正值扩展(dilate)，负值收缩(erode)
         """
-        # 将PIL图像转换为numpy数组进行处理
+        restored_np = np.array(restored_image)
+        processed_np = np.array(resized_processed)
+        original_np = np.array(original_image)
+        
+        x1, y1, x2, y2 = crop_coords
+        crop_width = x2 - x1
+        crop_height = y2 - y1
+        
+        # 将输入mask转换为PIL图像并调整大小
+        pil_mask = self._tensor_to_pil_mask(input_mask)
+        resized_mask = pil_mask.resize((crop_width, crop_height), Image.LANCZOS)
+        mask_np = np.array(resized_mask)
+        
+        # 对mask进行扩展或收缩
+        if mask_expand != 0:
+            abs_expand = abs(mask_expand)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (abs_expand * 2 + 1, abs_expand * 2 + 1))
+            if mask_expand > 0:
+                # 正值：扩展(膨胀)
+                mask_np = cv2.dilate(mask_np, kernel, iterations=1)
+            else:
+                # 负值：收缩(腐蚀)
+                mask_np = cv2.erode(mask_np, kernel, iterations=1)
+        
+        # 对mask边缘应用高斯模糊羽化
+        if blur_amount > 0:
+            kernel_size = blur_amount * 2 + 1
+            mask_np = cv2.GaussianBlur(mask_np, (kernel_size, kernel_size), 0)
+        
+        # 归一化到0-1范围
+        mask_float = mask_np.astype(np.float32) / 255.0
+        
+        # 扩展mask维度以匹配图像通道
+        mask_3ch = np.stack([mask_float] * 3, axis=-1)
+        
+        # 提取原图在crop区域的部分
+        original_crop = original_np[y1:y2, x1:x2]
+        
+        # 在crop区域内混合：mask白色区域使用processed，黑色区域使用original
+        blended_crop = (processed_np * mask_3ch + original_crop * (1 - mask_3ch)).astype(np.uint8)
+        
+        # 将混合结果放回原图
+        restored_np[y1:y2, x1:x2] = blended_crop
+        
+        return Image.fromarray(restored_np)
+    
+    def _apply_bbox_edge_blur(self, restored_image, original_image, crop_coords, blur_amount, mask_expand):
+        """对bbox边缘应用高斯模糊过渡
+        blur_amount: 高斯模糊的半径
+        mask_expand: 遮罩扩展值，正值扩展(dilate)，负值收缩(erode)
+        """
         restored_np = np.array(restored_image)
         original_np = np.array(original_image)
         
         x1, y1, x2, y2 = crop_coords
-        pad_left, pad_top, pad_right, pad_bottom = pad_info
-        orig_width, orig_height = original_size
+        img_h, img_w = restored_np.shape[:2]
         
-        # 计算在填充后图像中的实际坐标
-        actual_x1 = x1
-        actual_y1 = y1
-        actual_x2 = x2
-        actual_y2 = y2
+        # 创建bbox形状的mask，内部为白色
+        bbox_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+        bbox_mask[y1:y2, x1:x2] = 255
         
-        # 创建基础mask，初始化为全0（完全使用处理后图像）
-        base_mask = np.zeros(restored_np.shape[:2], dtype=np.uint8)
+        # 对mask进行扩展或收缩
+        if mask_expand != 0:
+            abs_expand = abs(mask_expand)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (abs_expand * 2 + 1, abs_expand * 2 + 1))
+            if mask_expand > 0:
+                # 正值：扩展(膨胀)
+                bbox_mask = cv2.dilate(bbox_mask, kernel, iterations=1)
+            else:
+                # 负值：收缩(腐蚀)
+                bbox_mask = cv2.erode(bbox_mask, kernel, iterations=1)
         
-        # 定义边缘纯白色区域（完全透明，显示原始图像）
-        # 边缘区域：从裁剪框边缘向内延伸blur_amount像素的区域
+        # 对mask应用高斯模糊，创建边缘羽化
         if blur_amount > 0:
-            # 计算内部区域边界（从边缘向内延伸blur_amount像素后的边界）
-            inner_x1 = actual_x1 + blur_amount
-            inner_y1 = actual_y1 + blur_amount
-            inner_x2 = actual_x2 - blur_amount
-            inner_y2 = actual_y2 - blur_amount
-            
-            # 确保内部区域边界有效（不超出裁剪框范围）
-            inner_x1 = max(actual_x1, min(inner_x1, actual_x2))
-            inner_y1 = max(actual_y1, min(inner_y1, actual_y2))
-            inner_x2 = max(actual_x1, min(inner_x2, actual_x2))
-            inner_y2 = max(actual_y1, min(inner_y2, actual_y2))
-            
-            # 定义过渡区域边界（从边缘向内延伸2*blur_amount像素，用于模糊过渡）
-            transition_x1 = actual_x1 + blur_amount
-            transition_y1 = actual_y1 + blur_amount
-            transition_x2 = actual_x2 - blur_amount
-            transition_y2 = actual_y2 - blur_amount
-            
-            # 创建过渡区域的mask（用于后续模糊）
-            transition_mask = np.zeros(restored_np.shape[:2], dtype=np.uint8)
-            
-            # 定义纯白色边缘区域（完全显示原始图像）
-            # 1. 左边边缘：从左边界到inner_x1
-            if actual_x1 < inner_x1:
-                base_mask[:, actual_x1:inner_x1] = 255
-            
-            # 2. 右边边缘：从inner_x2到右边界
-            if inner_x2 < actual_x2:
-                base_mask[:, inner_x2:actual_x2] = 255
-            
-            # 3. 顶部边缘：从顶部边界到inner_y1
-            if actual_y1 < inner_y1:
-                base_mask[actual_y1:inner_y1, actual_x1:actual_x2] = 255
-            
-            # 4. 底部边缘：从inner_y2到actual_y2
-            if inner_y2 < actual_y2:
-                base_mask[inner_y2:actual_y2, actual_x1:actual_x2] = 255
-            
-            # 定义过渡区域（用于创建平滑过渡效果）
-            # 这个区域将在后面应用高斯模糊
-            # 1. 左侧过渡区：从inner_x1到transition_x1 + blur_amount
-            left_transition_end = min(transition_x1 + blur_amount, actual_x2)
-            if inner_x1 < left_transition_end:
-                transition_mask[:, inner_x1:left_transition_end] = 255
-            
-            # 2. 右侧过渡区：从transition_x2 - blur_amount到inner_x2
-            right_transition_start = max(transition_x2 - blur_amount, actual_x1)
-            if right_transition_start < inner_x2:
-                transition_mask[:, right_transition_start:inner_x2] = 255
-            
-            # 3. 顶部过渡区：从inner_y1到transition_y1 + blur_amount
-            top_transition_end = min(transition_y1 + blur_amount, actual_y2)
-            if inner_y1 < top_transition_end:
-                transition_mask[inner_y1:top_transition_end, actual_x1:actual_x2] = 255
-            
-            # 4. 底部过渡区：从transition_y2 - blur_amount到inner_y2
-            bottom_transition_start = max(transition_y2 - blur_amount, actual_y1)
-            if bottom_transition_start < inner_y2:
-                transition_mask[bottom_transition_start:inner_y2, actual_x1:actual_x2] = 255
-            
-            # 清除内部区域（中心部分）为0，确保内部区域完全使用处理后图像
-            if inner_x1 < inner_x2 and inner_y1 < inner_y2:
-                base_mask[inner_y1:inner_y2, inner_x1:inner_x2] = 0
-                transition_mask[inner_y1:inner_y2, inner_x1:inner_x2] = 0
-        
-        # 应用高斯模糊来创建从纯白到纯黑的平滑过渡
-        # 只对过渡区域应用模糊，保留纯白色边缘区域
-        if blur_amount > 0:
-            # 模糊半径为blur_amount，确保过渡平滑
-            # 使用奇数大小的内核以获得更好的效果
-            kernel_size = 2 * blur_amount + 1
-            
-            # 只对过渡区域应用模糊
-            blurred_transition = cv2.GaussianBlur(transition_mask, (kernel_size, kernel_size), 0)
-            
-            # 创建最终mask：纯白色边缘区域保持不变，过渡区域使用模糊后的结果
-            # 先复制基础mask（包含纯白色边缘区域）
-            final_mask = base_mask.copy()
-            
-            # 在过渡区域应用模糊效果，但确保不覆盖纯白色边缘区域
-            # 只在base_mask为0且transition_mask不为0的区域应用模糊
-            transition_area = (base_mask == 0) & (transition_mask > 0)
-            final_mask[transition_area] = blurred_transition[transition_area]
-        else:
-            final_mask = base_mask
+            kernel_size = blur_amount * 2 + 1
+            bbox_mask = cv2.GaussianBlur(bbox_mask, (kernel_size, kernel_size), 0)
         
         # 归一化到0-1范围
-        final_mask = final_mask.astype(np.float32) / 255.0
+        mask_float = bbox_mask.astype(np.float32) / 255.0
+        mask_3ch = np.stack([mask_float] * 3, axis=-1)
         
-        # 如果有输入mask并且mask_protect大于0，应用mask保护
-        if input_mask is not None and mask_protect > 0:
-            # 将输入mask转换为PIL图像
-            pil_input_mask = self._tensor_to_pil_mask(input_mask)
-            
-            # 调整mask大小以匹配裁剪区域
-            mask_width = actual_x2 - actual_x1
-            mask_height = actual_y2 - actual_y1
-            resized_mask = pil_input_mask.resize((mask_width, mask_height), Image.LANCZOS)
-            
-            # 创建与填充后图像相同大小的mask
-            full_mask = np.ones(restored_np.shape[:2], dtype=np.uint8) * 255
-            full_mask[actual_y1:actual_y2, actual_x1:actual_x2] = np.array(resized_mask)
-            
-            # 应用mask_protect模糊，使mask边缘平滑
-            if mask_protect > 0:
-                full_mask = cv2.GaussianBlur(full_mask, (2 * mask_protect + 1, 2 * mask_protect + 1), 0)
-            
-            # 归一化到0-1范围
-            full_mask = full_mask.astype(np.float32) / 255.0
-            
-            # 保护mask区域：在mask区域内使用较小的mask值（更倾向于显示处理后图像）
-            # 使用full_mask作为权重，越接近mask中心，权重越大
-            final_mask = final_mask * (1 - full_mask) + 0 * full_mask
+        # 混合：mask白色区域使用restored，黑色区域使用original
+        result_np = (restored_np * mask_3ch + original_np * (1 - mask_3ch)).astype(np.uint8)
         
-        # 扩展mask维度以匹配图像
-        final_mask = np.stack([final_mask] * 3, axis=-1)
-        
-        # 应用混合：
-        # - mask值为0：完全使用处理后的图像 (restored_np)
-        # - mask值为1：完全使用原始图像 (original_np)
-        # - 中间值：混合使用
-        restored_np = (restored_np * (1 - final_mask) + original_np * final_mask).astype(np.uint8)
-        
-        # 转换回PIL图像
-        return Image.fromarray(restored_np)
+        return Image.fromarray(result_np)
 
 
 # 节点映射
