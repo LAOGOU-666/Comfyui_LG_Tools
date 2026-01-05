@@ -41,13 +41,13 @@ class MaskBoxCropNodeV2:
         # 处理不同的tensor形状
         if len(tensor.shape) == 4:
             # 标准的4D tensor (batch, height, width, channels)
-            img_np = (tensor[0].cpu().numpy() * 255).astype(np.uint8)
+            img_np = np.clip(tensor[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         elif len(tensor.shape) == 3:
             # 3D tensor (height, width, channels)
-            img_np = (tensor.cpu().numpy() * 255).astype(np.uint8)
+            img_np = np.clip(tensor.cpu().numpy() * 255, 0, 255).astype(np.uint8)
         else:
             # 其他情况，尝试处理
-            img_np = (tensor.cpu().numpy() * 255).astype(np.uint8)
+            img_np = np.clip(tensor.cpu().numpy() * 255, 0, 255).astype(np.uint8)
             
         return Image.fromarray(img_np)
     
@@ -60,19 +60,19 @@ class MaskBoxCropNodeV2:
         # 处理不同的mask形状
         if len(mask.shape) == 4:
             # 标准的4D mask tensor (batch, height, width, channels)
-            mask_np = (mask[0].cpu().numpy() * 255).astype(np.uint8)
+            mask_np = np.clip(mask[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         elif len(mask.shape) == 3:
             # 3D mask tensor (batch, height, width) 或 (height, width, channels)
             if mask.shape[0] == 1:  # (1, height, width)
-                mask_np = (mask[0].cpu().numpy() * 255).astype(np.uint8)
+                mask_np = np.clip(mask[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
             else:  # (height, width, channels) 或其他情况
-                mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+                mask_np = np.clip(mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
         elif len(mask.shape) == 2:
             # 2D mask tensor (height, width)
-            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+            mask_np = np.clip(mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
         else:
             # 其他情况，尝试处理
-            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+            mask_np = np.clip(mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
             
         # 确保mask_np是2D数组
         if len(mask_np.shape) > 2:
@@ -136,11 +136,8 @@ class MaskBoxCropNodeV2:
         
         return (target_width, target_height)
     
-    def crop_and_resize(self, image, mask, resize_mode, Box_grow_factor=1.0, megapixels=1.0, divisible_by=1, ratio="auto", startup_threshold=0.4):
-        # 将输入转换为PIL图像
-        pil_image = self._tensor_to_pil(image)
-        pil_mask = self._tensor_to_pil_mask(mask)
-        
+    def _process_single_image(self, pil_image, pil_mask, resize_mode, Box_grow_factor, megapixels, divisible_by, ratio, startup_threshold, original_width, original_height):
+        """处理单张图片的裁剪和缩放"""
         # 确保mask是二值图像
         pil_mask = pil_mask.convert('L')
         
@@ -263,19 +260,73 @@ class MaskBoxCropNodeV2:
             resized_image = cropped_image.resize(target_dimensions, resample_filter)
             resized_mask = cropped_mask.resize(target_dimensions, resample_filter)
         
-        # 转换回tensor
-        output_image = self._pil_to_tensor(resized_image)
-        output_mask = self._pil_to_mask(resized_mask)
-        
         # 返回crop_box信息以便还原使用
         crop_info = {
             "original_coords": crop_box,
             "padded_size": (pil_image.width, pil_image.height),
-            "original_image_size": (image.shape[2], image.shape[1]),  # width, height
+            "original_image_size": (original_width, original_height),  # width, height
             "pad_info": (pad_left, pad_top, pad_right, pad_bottom)
         }
         
-        return (output_image, crop_info, output_mask)
+        return resized_image, resized_mask, crop_info
+
+    def crop_and_resize(self, image, mask, resize_mode, Box_grow_factor=1.0, megapixels=1.0, divisible_by=1, ratio="auto", startup_threshold=0.4):
+        image_batch_size = image.shape[0]
+        mask_batch_size = mask.shape[0] if len(mask.shape) == 3 else 1
+        # 取image和mask中较大的batch_size
+        batch_size = max(image_batch_size, mask_batch_size)
+        
+        original_width = image.shape[2]
+        original_height = image.shape[1]
+        
+        output_images = []
+        output_masks = []
+        crop_infos = []
+        
+        for i in range(batch_size):
+            # 获取当前批次的图像，如果image只有1张则复用
+            single_image = image[i] if i < image_batch_size else image[0]
+            # 获取当前批次的mask，如果mask只有1张则复用
+            if len(mask.shape) == 3:
+                single_mask = mask[i] if i < mask_batch_size else mask[0]
+            else:
+                single_mask = mask
+            
+            # 转换为PIL图像
+            img_np = np.clip(single_image.cpu().numpy() * 255, 0, 255).astype(np.uint8)
+            pil_image = Image.fromarray(img_np)
+            
+            mask_np = np.clip(single_mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
+            if len(mask_np.shape) > 2:
+                mask_np = mask_np[:, :, 0]
+            pil_mask = Image.fromarray(mask_np, mode='L')
+            
+            # 处理单张图片
+            resized_image, resized_mask, crop_info = self._process_single_image(
+                pil_image, pil_mask, resize_mode, Box_grow_factor, 
+                megapixels, divisible_by, ratio, startup_threshold,
+                original_width, original_height
+            )
+            
+            # 转换回tensor
+            img_tensor = np.array(resized_image).astype(np.float32) / 255.0
+            mask_tensor = np.array(resized_mask).astype(np.float32) / 255.0
+            
+            output_images.append(img_tensor)
+            output_masks.append(mask_tensor)
+            crop_infos.append(crop_info)
+        
+        # 堆叠为批次tensor
+        output_image = torch.from_numpy(np.stack(output_images, axis=0))
+        output_mask = torch.from_numpy(np.stack(output_masks, axis=0))
+        
+        # 返回crop_box信息列表以便还原使用
+        crop_info_batch = {
+            "batch_size": batch_size,
+            "crop_infos": crop_infos
+        }
+        
+        return (output_image, crop_info_batch, output_mask)
 
 
 class ImageRestoreNodeV2:
@@ -314,13 +365,13 @@ class ImageRestoreNodeV2:
         # 处理不同的tensor形状
         if len(tensor.shape) == 4:
             # 标准的4D tensor (batch, height, width, channels)
-            img_np = (tensor[0].cpu().numpy() * 255).astype(np.uint8)
+            img_np = np.clip(tensor[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         elif len(tensor.shape) == 3:
             # 3D tensor (height, width, channels)
-            img_np = (tensor.cpu().numpy() * 255).astype(np.uint8)
+            img_np = np.clip(tensor.cpu().numpy() * 255, 0, 255).astype(np.uint8)
         else:
             # 其他情况，尝试处理
-            img_np = (tensor.cpu().numpy() * 255).astype(np.uint8)
+            img_np = np.clip(tensor.cpu().numpy() * 255, 0, 255).astype(np.uint8)
             
         return Image.fromarray(img_np)
     
@@ -333,19 +384,19 @@ class ImageRestoreNodeV2:
         # 处理不同的mask形状
         if len(mask.shape) == 4:
             # 标准的4D mask tensor (batch, height, width, channels)
-            mask_np = (mask[0].cpu().numpy() * 255).astype(np.uint8)
+            mask_np = np.clip(mask[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         elif len(mask.shape) == 3:
             # 3D mask tensor (batch, height, width) 或 (height, width, channels)
             if mask.shape[0] == 1:  # (1, height, width)
-                mask_np = (mask[0].cpu().numpy() * 255).astype(np.uint8)
+                mask_np = np.clip(mask[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
             else:  # (height, width, channels) 或其他情况
-                mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+                mask_np = np.clip(mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
         elif len(mask.shape) == 2:
             # 2D mask tensor (height, width)
-            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+            mask_np = np.clip(mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
         else:
             # 其他情况，尝试处理
-            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+            mask_np = np.clip(mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
             
         # 确保mask_np是2D数组
         if len(mask_np.shape) > 2:
@@ -359,16 +410,13 @@ class ImageRestoreNodeV2:
         img_np = np.array(pil_image).astype(np.float32) / 255.0
         return torch.from_numpy(img_np)[None,]
     
-    def restore_image(self, original_image, processed_image, crop_box, blur_amount, mask_expand, mask=None):
-        # 将输入转换为PIL图像
-        original_pil = self._tensor_to_pil(original_image)
-        processed_pil = self._tensor_to_pil(processed_image)
-        
+    def _restore_single_image(self, original_pil, processed_pil, crop_info, blur_amount, mask_expand, single_mask=None):
+        """处理单张图片的还原"""
         # 获取裁剪信息
-        original_coords = crop_box["original_coords"]
-        padded_size = crop_box["padded_size"]
-        original_image_size = crop_box["original_image_size"]
-        pad_info = crop_box["pad_info"]
+        original_coords = crop_info["original_coords"]
+        padded_size = crop_info["padded_size"]
+        original_image_size = crop_info["original_image_size"]
+        pad_info = crop_info["pad_info"]
         
         pad_left, pad_top, pad_right, pad_bottom = pad_info
         
@@ -395,14 +443,14 @@ class ImageRestoreNodeV2:
         padded_original = restored_image.copy()
         
         # 根据是否有mask决定粘贴方式
-        if mask is not None:
+        if single_mask is not None:
             # 有mask：只在mask区域粘贴处理后的图像
             restored_image = self._apply_mask_blend(
                 restored_image,
                 resized_processed,
                 padded_original,
                 original_coords,
-                mask,
+                single_mask,
                 blur_amount,
                 mask_expand
             )
@@ -427,14 +475,61 @@ class ImageRestoreNodeV2:
                 pad_top + original_image_size[1]
             ))
         
-        # 转换回tensor
-        output_image = self._pil_to_tensor(restored_image)
+        return restored_image
+
+    def restore_image(self, original_image, processed_image, crop_box, blur_amount, mask_expand, mask=None):
+        batch_size = original_image.shape[0]
+        
+        # 检查是否为批次格式的crop_box
+        if "batch_size" in crop_box:
+            crop_infos = crop_box["crop_infos"]
+        else:
+            # 兼容旧格式（单张图片）
+            crop_infos = [crop_box] * batch_size
+        
+        output_images = []
+        
+        for i in range(batch_size):
+            # 获取当前批次的图像
+            single_original = original_image[i]
+            single_processed = processed_image[i]
+            crop_info = crop_infos[i] if i < len(crop_infos) else crop_infos[0]
+            
+            # 转换为PIL图像
+            orig_np = np.clip(single_original.cpu().numpy() * 255, 0, 255).astype(np.uint8)
+            original_pil = Image.fromarray(orig_np)
+            
+            proc_np = np.clip(single_processed.cpu().numpy() * 255, 0, 255).astype(np.uint8)
+            processed_pil = Image.fromarray(proc_np)
+            
+            # 获取当前批次的mask（如果有）
+            single_mask = None
+            if mask is not None:
+                if len(mask.shape) == 3:
+                    single_mask = mask[i] if i < mask.shape[0] else mask[0]
+                else:
+                    single_mask = mask
+            
+            # 处理单张图片
+            restored_image = self._restore_single_image(
+                original_pil, processed_pil, crop_info, 
+                blur_amount, mask_expand, single_mask
+            )
+            
+            # 转换回numpy
+            img_tensor = np.array(restored_image).astype(np.float32) / 255.0
+            output_images.append(img_tensor)
+        
+        # 堆叠为批次tensor
+        output_image = torch.from_numpy(np.stack(output_images, axis=0))
+        
         return (output_image,)
     
     def _apply_mask_blend(self, restored_image, resized_processed, original_image, crop_coords, input_mask, blur_amount, mask_expand):
         """使用mask混合图像，只在mask区域粘贴处理后的图像
         blur_amount: 对mask边缘应用高斯模糊羽化
         mask_expand: 遮罩扩展值，正值扩展(dilate)，负值收缩(erode)
+        input_mask: 单个mask tensor (height, width) 或 (1, height, width)
         """
         restored_np = np.array(restored_image)
         processed_np = np.array(resized_processed)
@@ -444,8 +539,16 @@ class ImageRestoreNodeV2:
         crop_width = x2 - x1
         crop_height = y2 - y1
         
-        # 将输入mask转换为PIL图像并调整大小
-        pil_mask = self._tensor_to_pil_mask(input_mask)
+        # 将输入mask转换为numpy数组
+        if torch.is_tensor(input_mask):
+            mask_np = np.clip(input_mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
+            if len(mask_np.shape) > 2:
+                mask_np = mask_np[0] if mask_np.shape[0] == 1 else mask_np[:, :, 0]
+        else:
+            mask_np = input_mask
+        
+        # 转换为PIL并调整大小
+        pil_mask = Image.fromarray(mask_np, mode='L')
         resized_mask = pil_mask.resize((crop_width, crop_height), Image.LANCZOS)
         mask_np = np.array(resized_mask)
         

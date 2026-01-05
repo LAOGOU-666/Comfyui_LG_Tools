@@ -107,7 +107,7 @@ def tensor_to_base64(tensor):
     if len(tensor.shape) == 3:
         tensor = tensor.unsqueeze(0)
     
-    array = (tensor[0].cpu().numpy() * 255).astype(np.uint8)
+    array = np.clip(tensor[0].cpu().numpy() * 255, 0, 255).astype(np.uint8)
     
     if array.shape[-1] == 1:
         array = np.repeat(array, 3, axis=-1)
@@ -358,7 +358,7 @@ class FastCanvasComposite:
         if len(tensor.shape) == 4:
             tensor = tensor[0]  # 移除批次维度
         # 转换到 0-255 范围
-        tensor = (tensor * 255).byte()
+        tensor = (torch.clamp(tensor, 0, 1) * 255).byte()
         # 转换为PIL图像
         return Image.fromarray(tensor.cpu().numpy())
 
@@ -453,7 +453,7 @@ class FastCanvasComposite:
                 
                 # 处理遮罩
                 current_mask = mask[i] if mask.dim() == 3 else mask[i:i+1]
-                mask_pil = Image.fromarray((current_mask.cpu().numpy() * 255).astype(np.uint8), 'L')
+                mask_pil = Image.fromarray(np.clip(current_mask.cpu().numpy() * 255, 0, 255).astype(np.uint8), 'L')
                 
                 if invert_mask:
                     mask_pil = ImageOps.invert(mask_pil)

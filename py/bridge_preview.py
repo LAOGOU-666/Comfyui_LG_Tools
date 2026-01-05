@@ -64,8 +64,8 @@ class BridgePreviewNode(PreviewImage):
             for i in range(batch_size):
                 single_image = images[i:i+1]
                 single_mask = mask[i]
-                np_image = (single_image.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
-                np_mask = (single_mask.cpu().numpy() * 255).astype(np.uint8)
+                np_image = np.clip(single_image.squeeze(0).cpu().numpy() * 255, 0, 255).astype(np.uint8)
+                np_mask = np.clip(single_mask.cpu().numpy() * 255, 0, 255).astype(np.uint8)
                 h, w, c = np_image.shape
                 rgba_image = np.zeros((h, w, 4), dtype=np.uint8)
                 rgba_image[:, :, :3] = np_image
