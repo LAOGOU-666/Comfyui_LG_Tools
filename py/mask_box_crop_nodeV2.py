@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from PIL import Image, ImageOps
 import cv2
+import re
 
 class MaskBoxCropNodeV2:
     """
@@ -25,6 +26,7 @@ class MaskBoxCropNodeV2:
                 "divisible_by": ("INT", {"default": 8, "min": 1, "max": 1024, "step": 1, "tooltip": "目标分辨率必须被此数字整除"}),
                 "ratio": (["auto", "1:1", "4:3", "3:4", "16:9", "9:16"], {"default": "auto", "tooltip": "裁剪比例模式，auto为自动检测最接近比例"}),
                 "startup_threshold": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "当mask的box面积与输入图像的面积占比达到此阈值时，跳过ratio和box_grow_factor判断"}),
+                "fill_color": ("STRING", {"default": "#FFFFFF", "tooltip": "边界超出时的填充颜色，支持hex格式(#FFFFFF/#FFF)或颜色名称(red/blue/green等)"}),
             }
         }
 
@@ -112,6 +114,49 @@ class MaskBoxCropNodeV2:
         
         return best_ratio
     
+    def _hex_to_rgb(self, hex_color):
+        """将hex颜色值或颜色名称转换为RGB元组"""
+        # 基础颜色名称映射
+        color_names = {
+            'white': (255, 255, 255),
+            'black': (0, 0, 0),
+            'red': (255, 0, 0),
+            'green': (0, 128, 0),
+            'blue': (0, 0, 255),
+            'yellow': (255, 255, 0),
+            'cyan': (0, 255, 255),
+            'magenta': (255, 0, 255),
+            'orange': (255, 165, 0),
+            'pink': (255, 192, 203),
+            'purple': (128, 0, 128),
+            'gray': (128, 128, 128),
+            'grey': (128, 128, 128),
+        }
+        
+        # 清理输入并转小写
+        hex_color = hex_color.strip().lower()
+        
+        # 检查是否是颜色名称
+        if hex_color in color_names:
+            return color_names[hex_color]
+        
+        # 移除#前缀
+        hex_color = hex_color.lstrip('#')
+        
+        # 支持3位和6位hex格式
+        if len(hex_color) == 3:
+            hex_color = ''.join([c*2 for c in hex_color])
+        
+        # 验证hex格式
+        if not re.match('^[0-9a-f]{6}$', hex_color):
+            # 无效格式，返回白色
+            return (255, 255, 255)
+        
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return (r, g, b)
+    
     def _calculate_target_dimensions(self, megapixels, aspect_ratio, divisible_by=1):
         """根据百万像素数、宽高比和可整除要求计算目标尺寸"""
         # 1024*1024 = 约1百万像素
@@ -136,7 +181,7 @@ class MaskBoxCropNodeV2:
         
         return (target_width, target_height)
     
-    def _process_single_image(self, pil_image, pil_mask, resize_mode, Box_grow_factor, megapixels, divisible_by, ratio, startup_threshold, original_width, original_height):
+    def _process_single_image(self, pil_image, pil_mask, resize_mode, Box_grow_factor, megapixels, divisible_by, ratio, startup_threshold, original_width, original_height, fill_color=(255, 255, 255)):
         """处理单张图片的裁剪和缩放"""
         # 确保mask是二值图像
         pil_mask = pil_mask.convert('L')
@@ -211,7 +256,7 @@ class MaskBoxCropNodeV2:
         
         # 如果需要padding，则对图像和mask都进行padding
         if pad_left > 0 or pad_top > 0 or pad_right > 0 or pad_bottom > 0:
-            pil_image = ImageOps.expand(pil_image, (pad_left, pad_top, pad_right, pad_bottom), fill=(255, 255, 255))
+            pil_image = ImageOps.expand(pil_image, (pad_left, pad_top, pad_right, pad_bottom), fill=fill_color)
             pil_mask = ImageOps.expand(pil_mask, (pad_left, pad_top, pad_right, pad_bottom), fill=0)
             
             # 调整坐标
@@ -265,12 +310,13 @@ class MaskBoxCropNodeV2:
             "original_coords": crop_box,
             "padded_size": (pil_image.width, pil_image.height),
             "original_image_size": (original_width, original_height),  # width, height
-            "pad_info": (pad_left, pad_top, pad_right, pad_bottom)
+            "pad_info": (pad_left, pad_top, pad_right, pad_bottom),
+            "fill_color": fill_color
         }
         
         return resized_image, resized_mask, crop_info
 
-    def crop_and_resize(self, image, mask, resize_mode, Box_grow_factor=1.0, megapixels=1.0, divisible_by=1, ratio="auto", startup_threshold=0.4):
+    def crop_and_resize(self, image, mask, resize_mode, Box_grow_factor=1.0, megapixels=1.0, divisible_by=1, ratio="auto", startup_threshold=0.4, fill_color="#FFFFFF"):
         image_batch_size = image.shape[0]
         mask_batch_size = mask.shape[0] if len(mask.shape) == 3 else 1
         # 取image和mask中较大的batch_size
@@ -278,6 +324,9 @@ class MaskBoxCropNodeV2:
         
         original_width = image.shape[2]
         original_height = image.shape[1]
+        
+        # 转换hex颜色为RGB元组
+        fill_color_rgb = self._hex_to_rgb(fill_color)
         
         output_images = []
         output_masks = []
@@ -305,7 +354,7 @@ class MaskBoxCropNodeV2:
             resized_image, resized_mask, crop_info = self._process_single_image(
                 pil_image, pil_mask, resize_mode, Box_grow_factor, 
                 megapixels, divisible_by, ratio, startup_threshold,
-                original_width, original_height
+                original_width, original_height, fill_color_rgb
             )
             
             # 转换回tensor
@@ -417,6 +466,7 @@ class ImageRestoreNodeV2:
         padded_size = crop_info["padded_size"]
         original_image_size = crop_info["original_image_size"]
         pad_info = crop_info["pad_info"]
+        fill_color = crop_info.get("fill_color", (255, 255, 255))  # 兼容旧格式
         
         pad_left, pad_top, pad_right, pad_bottom = pad_info
         
@@ -429,7 +479,7 @@ class ImageRestoreNodeV2:
         restored_image = original_pil.copy()
         if padded_size != (original_image_size[0], original_image_size[1]):
             # 如果之前进行了padding，我们需要创建一个填充后的图像
-            restored_image = Image.new("RGB", padded_size, (255, 255, 255))
+            restored_image = Image.new("RGB", padded_size, fill_color)
             # 粘贴原始图像的有效区域
             orig_region = (
                 pad_left, 
